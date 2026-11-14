@@ -61,7 +61,7 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kLowDensityFinishHysteresisCycles =
       misc_utils_ns::getParam<int>(nh, "kLowDensityFinishHysteresisCycles", 10);
   kLowDensityStaleMsgSec = misc_utils_ns::getParam<double>(nh, "kLowDensityStaleMsgSec", 5.0);
-  kLowDensityNoProgressSec = misc_utils_ns::getParam<double>(nh, "kLowDensityNoProgressSec", 90.0);
+  kLowDensityNoProgressSec = misc_utils_ns::getParam<double>(nh, "kLowDensityNoProgressSec", 60.0);
   kLowDensityProgressDistance = misc_utils_ns::getParam<double>(nh, "kLowDensityProgressDistance", 3.0);
 
   // Double
@@ -265,6 +265,12 @@ bool SensorCoveragePlanner3D::initialize(ros::NodeHandle& nh, ros::NodeHandle& n
     guard_params.max_age_cycles = misc_utils_ns::getParam<int>(nh_p, "low_density/max_age_cycles", 120);
     guard_params.missing_cycles_to_forget =
         misc_utils_ns::getParam<int>(nh_p, "low_density/missing_cycles_to_forget", 5);
+    guard_params.service_radius =
+        misc_utils_ns::getParam<double>(nh_p, "low_density/service_radius", 5.0);
+    guard_params.service_settle_sec =
+        misc_utils_ns::getParam<double>(nh_p, "low_density/service_settle_sec", 12.0);
+    guard_params.unreachable_cycle_thr =
+        misc_utils_ns::getParam<int>(nh_p, "low_density/unreachable_cycle_thr", 10);
     low_density_guard_.SetParameters(guard_params);
     ROS_INFO_STREAM("[TARE] Low-density point channel enabled: " << pp_.sub_pcd_density_map_topic_);
   }
@@ -770,6 +776,14 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
       low_density_last_progress_sec_ = now_sec;
     }
   }
+  // A cluster disappearing from the publisher's cloud IS densification
+  // success. Count it as progress even when the robot happens to shuttle
+  // within a small area, so the progress clock reflects real work.
+  if (diag.resolved_cell_num > 0)
+  {
+    low_density_last_progress_sec_ = now_sec;
+    low_density_last_progress_pos_ = pd_.robot_position_;
+  }
   const bool no_progress = (now_sec - low_density_last_progress_sec_) > pp_.kLowDensityNoProgressSec;
 
   // A second, semantic completion signal: the guard has retired every cluster
@@ -828,14 +842,15 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   ROS_INFO_THROTTLE(
       2.0,
       "[LowDensity] state: raw=%d gain=%d serviced=%d dropped=%d | cells=%d active=%d cooling=%d abandoned=%d "
-      "| no_gain=%d no_service=%d no_work=%d guard_idle=%d | idle=%.0fs no_prog=%d guard_done=%d "
-      "pending=%d stalled=%d expired=%d fresh=%d",
+      "resolved=%d attempting=%d | no_gain=%d no_service=%d no_work=%d guard_idle=%d | idle=%.0fs "
+      "no_prog=%d guard_done=%d pending=%d stalled=%d expired=%d fresh=%d",
       diag.raw_point_num, low_density_uncovered_num_, low_density_serviced_num_,
       pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.active_cell_num, diag.cooling_cell_num,
-      diag.abandoned_cell_num, low_density_no_gain_cycles_, low_density_no_service_cycles_,
-      low_density_no_work_cycles_, low_density_no_viewpoint_cycles_, now_sec - low_density_last_progress_sec_,
-      static_cast<int>(no_progress), static_cast<int>(guard_done), static_cast<int>(low_density_work_pending_),
-      static_cast<int>(stalled), static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
+      diag.abandoned_cell_num, diag.resolved_cell_num, diag.attempting_cell_num, low_density_no_gain_cycles_,
+      low_density_no_service_cycles_, low_density_no_work_cycles_, low_density_no_viewpoint_cycles_,
+      now_sec - low_density_last_progress_sec_, static_cast<int>(no_progress), static_cast<int>(guard_done),
+      static_cast<int>(low_density_work_pending_), static_cast<int>(stalled),
+      static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
 }
 
 void SensorCoveragePlanner3D::FeedbackLowDensityServiced()

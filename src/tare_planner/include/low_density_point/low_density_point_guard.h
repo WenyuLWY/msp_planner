@@ -86,6 +86,19 @@ struct LowDensityGuardParameters
   int max_failures;
   double cooldown_base_sec;
   double cooldown_max_sec;
+
+  // A "service attempt" only starts when the ROBOT actually gets this close
+  // to the cluster, and only counts as a failure if the point is STILL
+  // published after service_settle_sec. TARE replans every ~2 s but a local
+  // path of 20-50 m takes tens of seconds to walk, and msp needs additional
+  // scans to erase a resolved point. Charging a failure on the very next
+  // cycle cooled down almost every active cluster (cooling=14..22 vs
+  // cells=15..27), starving the gain channel and causing in-place shuttling.
+  double service_radius;
+  double service_settle_sec;
+  // Clusters that never produce any viewpoint are charged once every this
+  // many cycles instead of every cycle.
+  int unreachable_cycle_thr;
   // Fallback for clusters that are never selected (no viewpoint can see them,
   // or they always lose to the surface/frontier channels): stop retrying after
   // they have been hanging around for this many cycles.
@@ -107,6 +120,9 @@ struct LowDensityGuardParameters
     , max_failures(4)
     , cooldown_base_sec(8.0)
     , cooldown_max_sec(120.0)
+    , service_radius(5.0)
+    , service_settle_sec(12.0)
+    , unreachable_cycle_thr(10)
     , max_age_cycles(120)
     , missing_cycles_to_forget(5)
   {
@@ -135,6 +151,11 @@ struct LowDensityGuardDiagnostics
   int abandoned_cell_num;
   int active_cell_num;
   int output_point_num;
+  // Clusters that vanished this cycle (densification actually succeeded).
+  // Unlike raw_point_num this is monotonic progress and is immune to msp
+  // adding fresh isolated voxels elsewhere in its global map.
+  int resolved_cell_num;
+  int attempting_cell_num;
   LowDensityGuardDiagnostics()
     : raw_point_num(0)
     , dedup_point_num(0)
@@ -144,6 +165,8 @@ struct LowDensityGuardDiagnostics
     , abandoned_cell_num(0)
     , active_cell_num(0)
     , output_point_num(0)
+    , resolved_cell_num(0)
+    , attempting_cell_num(0)
   {
   }
 };
@@ -215,6 +238,7 @@ public:
     diag.cell_num = static_cast<int>(buckets.size());
     ComputeSupport(buckets);
 
+    const double anchor = parameters_.anchor_cell_size > 0.0 ? parameters_.anchor_cell_size : 1.0;
     std::unordered_set<uint64_t> seen_keys;
     for (std::unordered_map<uint64_t, CellBucket>::iterator it = buckets.begin(); it != buckets.end(); ++it)
     {
@@ -226,22 +250,35 @@ public:
       state.missing_cycles = 0;
       state.age_cycles++;
 
-      // Surviving a cycle in which we already dispatched the robot for this
-      // cluster is the definition of a failed attempt. The external publisher
-      // is responsible for removing points that were successfully re-scanned.
-      if (state.serviced_last_cycle)
+      // A failed attempt requires the ROBOT to have actually reached this
+      // region and the point to still be published after service_settle_sec.
+      // msp erases resolved points asynchronously and TARE replans every ~2 s
+      // while a 20-50 m local path takes tens of seconds to walk, so the old
+      // "still here next cycle = failure" rule cooled down nearly every
+      // active cluster and starved the gain channel.
+      const double cdx = (bucket.ix + 0.5) * anchor - robot_position.x;
+      const double cdy = (bucket.iy + 0.5) * anchor - robot_position.y;
+      const double cluster_dist2 = cdx * cdx + cdy * cdy;
+      const double service_radius2 = parameters_.service_radius * parameters_.service_radius;
+      if (cluster_dist2 <= service_radius2 && !state.abandoned)
       {
-        state.failures++;
-        const double exponent = static_cast<double>(std::max(0, state.failures - 1));
-        const double cooldown =
-            std::min(parameters_.cooldown_base_sec * std::pow(2.0, exponent), parameters_.cooldown_max_sec);
-        state.cooldown_until = now_sec + cooldown;
-        if (state.failures >= parameters_.max_failures)
+        if (state.attempt_started_sec < 0.0)
         {
-          state.abandoned = true;
+          state.attempt_started_sec = now_sec;
         }
+        else if (now_sec - state.attempt_started_sec >= parameters_.service_settle_sec)
+        {
+          RegisterFailure(state, now_sec);
+          state.attempt_started_sec = -1.0;
+        }
+        diag.attempting_cell_num++;
       }
-      state.serviced_last_cycle = false;
+      else
+      {
+        // Robot left before the attempt settled: cancel it rather than
+        // charging a failure for a region it never re-scanned.
+        state.attempt_started_sec = -1.0;
+      }
       if (!state.abandoned && state.age_cycles > parameters_.max_age_cycles)
       {
         state.abandoned = true;
@@ -274,8 +311,13 @@ public:
     {
       if (seen_keys.find(it->first) == seen_keys.end())
       {
+        if (it->second.missing_cycles == 0 && !it->second.abandoned)
+        {
+          diag.resolved_cell_num++;
+        }
         it->second.missing_cycles++;
-        it->second.serviced_last_cycle = false;
+        it->second.attempt_started_sec = -1.0;
+        it->second.unreachable_cycles = 0;
         if (it->second.missing_cycles > parameters_.missing_cycles_to_forget)
         {
           it = cell_states_.erase(it);
@@ -298,7 +340,6 @@ public:
     // selecting by support alone spends the entire cluster budget on distant
     // regions: each cycle those targets are dropped, gain stays 0 and the
     // local path collapses to zero length (in-place oscillation).
-    const double anchor = parameters_.anchor_cell_size > 0.0 ? parameters_.anchor_cell_size : 1.0;
     std::sort(ordered_keys.begin(), ordered_keys.end(),
               [&buckets, &robot_position, anchor](uint64_t a, uint64_t b)
               {
@@ -352,9 +393,11 @@ public:
   }
 
   /**
-   * @brief Called after the viewpoint set is fixed, with the clusters whose
-   * targets are covered by a selected viewpoint. These clusters spent path
-   * budget this cycle; if they still exist next cycle they count as a failure.
+   * @brief Clusters that spent path budget this cycle. We no longer charge a
+   * failure here: reaching a target takes many replanning cycles. The actual
+   * attempt/failure bookkeeping is geometric and lives in Update(), driven by
+   * the robot position and service_settle_sec. This call only clears the
+   * unreachable counter, since the cluster clearly produced a viewpoint.
    */
   void NoteServiced(const std::vector<uint64_t>& cluster_keys)
   {
@@ -363,67 +406,80 @@ public:
       std::unordered_map<uint64_t, CellState>::iterator it = cell_states_.find(cluster_keys[i]);
       if (it != cell_states_.end() && !it->second.abandoned)
       {
-        it->second.serviced_last_cycle = true;
+        it->second.unreachable_cycles = 0;
       }
     }
   }
 
   /**
-   * @brief Count clusters that were released by the guard but produced no
-   * viewpoint at all (no candidate viewpoint within the effective range).
-   * Without this, unreachable clusters never accrue a failure: they are
-   * released every cycle, dropped every cycle, and can never be cooled down
-   * or abandoned -- the give-up policy deadlocks and the robot keeps
-   * re-trying the same handful of points forever.
+   * @brief Clusters released by the guard that produced NO viewpoint at all.
+   * Charge one failure only after they have been unreachable for
+   * unreachable_cycle_thr consecutive cycles, so a transient geometry gap
+   * (robot turning a corner) does not instantly cool the whole set down.
    */
   void NoteUnreachable(const std::vector<uint64_t>& cluster_keys)
   {
-    // One cluster can contribute many dropped points. Charge it only ONCE per
-    // cycle, otherwise a handful of frames burns through all max_failures.
-    std::unordered_set<uint64_t> charged;
-    charged.reserve(cluster_keys.size());
+    std::unordered_set<uint64_t> seen;
+    seen.reserve(cluster_keys.size());
     for (std::size_t i = 0; i < cluster_keys.size(); i++)
     {
-      if (!charged.insert(cluster_keys[i]).second)
+      if (!seen.insert(cluster_keys[i]).second)
       {
         continue;
       }
       std::unordered_map<uint64_t, CellState>::iterator it = cell_states_.find(cluster_keys[i]);
-      if (it != cell_states_.end() && !it->second.abandoned && !it->second.serviced_last_cycle &&
-          last_update_sec_ >= it->second.cooldown_until)
+      if (it == cell_states_.end() || it->second.abandoned ||
+          last_update_sec_ < it->second.cooldown_until)
       {
-        it->second.failures++;
-        const double exponent = static_cast<double>(std::max(0, it->second.failures - 1));
-        const double cooldown =
-            std::min(parameters_.cooldown_base_sec * std::pow(2.0, exponent), parameters_.cooldown_max_sec);
-        it->second.cooldown_until = last_update_sec_ + cooldown;
-        if (it->second.failures >= parameters_.max_failures)
-        {
-          it->second.abandoned = true;
-        }
+        continue;
+      }
+      it->second.unreachable_cycles++;
+      if (it->second.unreachable_cycles >= std::max(1, parameters_.unreachable_cycle_thr))
+      {
+        it->second.unreachable_cycles = 0;
+        RegisterFailure(it->second, last_update_sec_);
       }
     }
   }
 
+
 private:
+
   struct CellState
   {
     int failures;
     int age_cycles;
     int missing_cycles;
     double cooldown_until;
+    double attempt_started_sec;
+    int unreachable_cycles;
     bool abandoned;
-    bool serviced_last_cycle;
     CellState()
       : failures(0)
       , age_cycles(0)
       , missing_cycles(0)
       , cooldown_until(-1.0)
+      , attempt_started_sec(-1.0)
+      , unreachable_cycles(0)
       , abandoned(false)
-      , serviced_last_cycle(false)
     {
     }
   };
+
+  void RegisterFailure(CellState& state, double now_sec)
+  {
+    state.failures++;
+    const double exponent = static_cast<double>(std::max(0, state.failures - 1));
+    const double cooldown =
+        std::min(parameters_.cooldown_base_sec * std::pow(2.0, exponent), parameters_.cooldown_max_sec);
+    state.cooldown_until = now_sec + cooldown;
+    state.unreachable_cycles = 0;
+    state.attempt_started_sec = -1.0;
+    if (state.failures >= parameters_.max_failures)
+    {
+      state.abandoned = true;
+    }
+  }
 
   struct CellBucket
   {
