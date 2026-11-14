@@ -99,6 +99,13 @@ struct LowDensityGuardParameters
   // Clusters that never produce any viewpoint are charged once every this
   // many cycles instead of every cycle.
   int unreachable_cycle_thr;
+  // A cluster that keeps getting viewpoints but whose points NEVER disappear
+  // is charged one failure after this many serviced cycles. This is the
+  // third give-up path: geometry-arrival and dropped-target paths both go
+  // quiet once the robot shuttles inside a small area with valid viewpoints,
+  // leaving such clusters active forever (this run: raw stuck at 72..77,
+  // resolved=0, no_prog=0, exploration never finishes).
+  int service_cycle_thr;
   // Fallback for clusters that are never selected (no viewpoint can see them,
   // or they always lose to the surface/frontier channels): stop retrying after
   // they have been hanging around for this many cycles.
@@ -123,6 +130,7 @@ struct LowDensityGuardParameters
     , service_radius(5.0)
     , service_settle_sec(12.0)
     , unreachable_cycle_thr(10)
+    , service_cycle_thr(6)
     , max_age_cycles(120)
     , missing_cycles_to_forget(5)
   {
@@ -156,6 +164,8 @@ struct LowDensityGuardDiagnostics
   // adding fresh isolated voxels elsewhere in its global map.
   int resolved_cell_num;
   int attempting_cell_num;
+  // Clusters charged a failure for repeated service (previous cycle).
+  int serviced_fail_cell_num;
   LowDensityGuardDiagnostics()
     : raw_point_num(0)
     , dedup_point_num(0)
@@ -167,6 +177,7 @@ struct LowDensityGuardDiagnostics
     , output_point_num(0)
     , resolved_cell_num(0)
     , attempting_cell_num(0)
+    , serviced_fail_cell_num(0)
   {
   }
 };
@@ -174,11 +185,11 @@ struct LowDensityGuardDiagnostics
 class LowDensityPointGuard
 {
 public:
-  LowDensityPointGuard() : parameters_(), last_diagnostics_(), last_update_sec_(0.0)
+  LowDensityPointGuard() : parameters_(), last_diagnostics_(), last_update_sec_(0.0), serviced_fail_num_(0)
   {
   }
   explicit LowDensityPointGuard(const LowDensityGuardParameters& parameters)
-    : parameters_(parameters), last_diagnostics_(), last_update_sec_(0.0)
+    : parameters_(parameters), last_diagnostics_(), last_update_sec_(0.0), serviced_fail_num_(0)
   {
   }
 
@@ -227,6 +238,8 @@ public:
     targets.clear();
     LowDensityGuardDiagnostics diag;
     diag.raw_point_num = static_cast<int>(raw_points.size());
+    diag.serviced_fail_cell_num = serviced_fail_num_;
+    serviced_fail_num_ = 0;
     last_update_sec_ = now_sec;
 
     std::vector<Point3D> dedup_points;
@@ -318,6 +331,7 @@ public:
         it->second.missing_cycles++;
         it->second.attempt_started_sec = -1.0;
         it->second.unreachable_cycles = 0;
+        it->second.serviced_cycles = 0;
         if (it->second.missing_cycles > parameters_.missing_cycles_to_forget)
         {
           it = cell_states_.erase(it);
@@ -393,23 +407,46 @@ public:
   }
 
   /**
-   * @brief Clusters that spent path budget this cycle. We no longer charge a
-   * failure here: reaching a target takes many replanning cycles. The actual
-   * attempt/failure bookkeeping is geometric and lives in Update(), driven by
-   * the robot position and service_settle_sec. This call only clears the
-   * unreachable counter, since the cluster clearly produced a viewpoint.
+   * @brief Clusters whose targets were covered by the final TSP viewpoints.
+   *
+   * This is the third give-up path. A cluster serviced this many times while
+   * its points never disappear is almost certainly un-densifiable (grazing
+   * surface, wall back, ceiling, or a region the robot never actually
+   * reaches). Charge ONE failure, then let exponential cooldown / abandonment
+   * do the rest. Without this, "dropped=0 and attempting=0" clusters stay
+   * active forever: gain is produced every cycle, serviced>0 every cycle,
+   * raw never falls and the finish latch can never close.
+   *
+   * Dedup by cluster key: one cluster can contribute many serviced points.
    */
   void NoteServiced(const std::vector<uint64_t>& cluster_keys)
   {
+    std::unordered_set<uint64_t> seen;
+    seen.reserve(cluster_keys.size());
     for (std::size_t i = 0; i < cluster_keys.size(); i++)
     {
-      std::unordered_map<uint64_t, CellState>::iterator it = cell_states_.find(cluster_keys[i]);
-      if (it != cell_states_.end() && !it->second.abandoned)
+      if (!seen.insert(cluster_keys[i]).second)
       {
-        it->second.unreachable_cycles = 0;
+        continue;
+      }
+      std::unordered_map<uint64_t, CellState>::iterator it = cell_states_.find(cluster_keys[i]);
+      if (it == cell_states_.end() || it->second.abandoned ||
+          last_update_sec_ < it->second.cooldown_until)
+      {
+        continue;
+      }
+      CellState& state = it->second;
+      state.unreachable_cycles = 0;
+      state.serviced_cycles++;
+      if (state.serviced_cycles >= std::max(1, parameters_.service_cycle_thr))
+      {
+        state.serviced_cycles = 0;
+        RegisterFailure(state, last_update_sec_);
+        serviced_fail_num_++;
       }
     }
   }
+
 
   /**
    * @brief Clusters released by the guard that produced NO viewpoint at all.
@@ -453,6 +490,7 @@ private:
     double cooldown_until;
     double attempt_started_sec;
     int unreachable_cycles;
+    int serviced_cycles;
     bool abandoned;
     CellState()
       : failures(0)
@@ -461,6 +499,7 @@ private:
       , cooldown_until(-1.0)
       , attempt_started_sec(-1.0)
       , unreachable_cycles(0)
+      , serviced_cycles(0)
       , abandoned(false)
     {
     }
@@ -474,6 +513,7 @@ private:
         std::min(parameters_.cooldown_base_sec * std::pow(2.0, exponent), parameters_.cooldown_max_sec);
     state.cooldown_until = now_sec + cooldown;
     state.unreachable_cycles = 0;
+    state.serviced_cycles = 0;
     state.attempt_started_sec = -1.0;
     if (state.failures >= parameters_.max_failures)
     {
@@ -583,5 +623,6 @@ private:
   LowDensityGuardDiagnostics last_diagnostics_;
   std::unordered_map<uint64_t, CellState> cell_states_;
   double last_update_sec_;
+  int serviced_fail_num_;
 };
 }  // namespace low_density_point_ns

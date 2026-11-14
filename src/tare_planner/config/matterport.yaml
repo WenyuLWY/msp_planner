@@ -160,3 +160,4 @@ low_density/missing_cycles_to_forget : 5
 low_density/service_radius : 5.0
 low_density/service_settle_sec : 12.0
 low_density/unreachable_cycle_thr : 10
+low_density/service_cycle_thr : 6

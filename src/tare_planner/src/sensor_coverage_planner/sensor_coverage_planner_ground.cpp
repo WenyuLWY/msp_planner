@@ -203,6 +203,7 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , low_density_last_msg_sec_(-1.0)
   , low_density_last_progress_sec_(-1.0)
   , low_density_progress_pos_valid_(false)
+  , low_density_max_progress_dist_(0.0)
   , low_density_no_viewpoint_cycles_(0)
 {
   initialize(nh, nh_p);
@@ -271,6 +272,8 @@ bool SensorCoveragePlanner3D::initialize(ros::NodeHandle& nh, ros::NodeHandle& n
         misc_utils_ns::getParam<double>(nh_p, "low_density/service_settle_sec", 12.0);
     guard_params.unreachable_cycle_thr =
         misc_utils_ns::getParam<int>(nh_p, "low_density/unreachable_cycle_thr", 10);
+    guard_params.service_cycle_thr =
+        misc_utils_ns::getParam<int>(nh_p, "low_density/service_cycle_thr", 6);
     low_density_guard_.SetParameters(guard_params);
     ROS_INFO_STREAM("[TARE] Low-density point channel enabled: " << pp_.sub_pcd_density_map_topic_);
   }
@@ -762,17 +765,22 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
     low_density_progress_pos_valid_ = true;
     low_density_last_progress_pos_ = pd_.robot_position_;
     low_density_last_progress_sec_ = now_sec;
+    low_density_max_progress_dist_ = 0.0;
   }
   else
   {
     const double dx = pd_.robot_position_.x - low_density_last_progress_pos_.x;
     const double dy = pd_.robot_position_.y - low_density_last_progress_pos_.y;
     const double dz = pd_.robot_position_.z - low_density_last_progress_pos_.z;
-    // Net displacement from the anchor, so back-and-forth jitter in place
-    // never accumulates into "progress".
-    if (std::sqrt(dx * dx + dy * dy + dz * dz) > pp_.kLowDensityProgressDistance)
+    const double dist_from_anchor = std::sqrt(dx * dx + dy * dy + dz * dz);
+    // MONOTONE: only exceeding the largest distance ever reached counts as
+    // progress. The anchor never moves. Shuttling back and forth over the
+    // same 3-4 m segment keeps dist_from_anchor <= max, so it can no longer
+    // reset the idle clock every few seconds (this run: idle 32s -> 0s
+    // repeatedly, no_prog stuck at 0 for the entire 190 s tail).
+    if (dist_from_anchor > low_density_max_progress_dist_ + pp_.kLowDensityProgressDistance)
     {
-      low_density_last_progress_pos_ = pd_.robot_position_;
+      low_density_max_progress_dist_ = dist_from_anchor;
       low_density_last_progress_sec_ = now_sec;
     }
   }
@@ -782,7 +790,6 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   if (diag.resolved_cell_num > 0)
   {
     low_density_last_progress_sec_ = now_sec;
-    low_density_last_progress_pos_ = pd_.robot_position_;
   }
   const bool no_progress = (now_sec - low_density_last_progress_sec_) > pp_.kLowDensityNoProgressSec;
 
@@ -842,11 +849,12 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   ROS_INFO_THROTTLE(
       2.0,
       "[LowDensity] state: raw=%d gain=%d serviced=%d dropped=%d | cells=%d active=%d cooling=%d abandoned=%d "
-      "resolved=%d attempting=%d | no_gain=%d no_service=%d no_work=%d guard_idle=%d | idle=%.0fs "
+      "resolved=%d attempting=%d svc_fail=%d | no_gain=%d no_service=%d no_work=%d guard_idle=%d | idle=%.0fs "
       "no_prog=%d guard_done=%d pending=%d stalled=%d expired=%d fresh=%d",
       diag.raw_point_num, low_density_uncovered_num_, low_density_serviced_num_,
       pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.active_cell_num, diag.cooling_cell_num,
-      diag.abandoned_cell_num, diag.resolved_cell_num, diag.attempting_cell_num, low_density_no_gain_cycles_,
+      diag.abandoned_cell_num, diag.resolved_cell_num, diag.attempting_cell_num, diag.serviced_fail_cell_num,
+      low_density_no_gain_cycles_,
       low_density_no_service_cycles_, low_density_no_work_cycles_, low_density_no_viewpoint_cycles_,
       now_sec - low_density_last_progress_sec_, static_cast<int>(no_progress), static_cast<int>(guard_done),
       static_cast<int>(low_density_work_pending_), static_cast<int>(stalled),

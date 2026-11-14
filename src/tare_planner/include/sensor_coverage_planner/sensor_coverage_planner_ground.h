@@ -247,6 +247,7 @@ private:
   double low_density_last_progress_sec_;
   geometry_msgs::Point low_density_last_progress_pos_;
   bool low_density_progress_pos_valid_;
+  double low_density_max_progress_dist_;
   int low_density_no_viewpoint_cycles_;
 
   ros::Time start_time_;
