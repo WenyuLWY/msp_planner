@@ -186,6 +186,10 @@ public:
   {
     covered_frontier_point_list_.clear();
   }
+  void ResetCoveredLowDensityPointList()
+  {
+    covered_low_density_point_list_.clear();
+  }
   const std::vector<int>& GetCoveredPointList() const
   {
     return covered_point_list_;
@@ -193,6 +197,10 @@ public:
   const std::vector<int>& GetCoveredFrontierPointList() const
   {
     return covered_frontier_point_list_;
+  }
+  const std::vector<int>& GetCoveredLowDensityPointList() const
+  {
+    return covered_low_density_point_list_;
   }
   void AddCoveredPoint(int point_idx)
   {
@@ -202,6 +210,10 @@ public:
   {
     covered_frontier_point_list_.push_back(point_idx);
   }
+  void AddCoveredLowDensityPoint(int point_idx)
+  {
+    covered_low_density_point_list_.push_back(point_idx);
+  }
   int GetCoveredPointNum() const
   {
     return covered_point_list_.size();
@@ -209,6 +221,10 @@ public:
   int GetCoveredFrontierPointNum() const
   {
     return covered_frontier_point_list_.size();
+  }
+  int GetCoveredLowDensityPointNum() const
+  {
+    return covered_low_density_point_list_.size();
   }
   int GetCollisionFrameCount() const
   {
@@ -257,5 +273,7 @@ private:
   std::vector<int> covered_point_list_;
   // Indices of the covered frontier points
   std::vector<int> covered_frontier_point_list_;
+  // Indices of the covered externally published low-density points
+  std::vector<int> covered_low_density_point_list_;
 };
 }  // namespace viewpoint_ns

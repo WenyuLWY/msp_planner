@@ -32,6 +32,8 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   sub_nogo_boundary_topic_ = misc_utils_ns::getParam<std::string>(nh, "sub_nogo_boundary_topic_", "/nogo_boundary");
   sub_joystick_topic_ = misc_utils_ns::getParam<std::string>(nh, "sub_joystick_topic_", "/joy");
   sub_reset_waypoint_topic_ = misc_utils_ns::getParam<std::string>(nh, "sub_reset_waypoint_topic_", "/reset_waypoint");
+  sub_pcd_density_map_topic_ = misc_utils_ns::getParam<std::string>(
+      nh, "sub_pcd_density_map_topic_", "/FilteringMappingNodelet/pcd_density_map");
   pub_exploration_finish_topic_ =
       misc_utils_ns::getParam<std::string>(nh, "pub_exploration_finish_topic_", "exploration_finish");
   pub_runtime_breakdown_topic_ =
@@ -50,6 +52,7 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kUseLineOfSightLookAheadPoint = misc_utils_ns::getParam<bool>(nh, "kUseLineOfSightLookAheadPoint", true);
   kNoExplorationReturnHome = misc_utils_ns::getParam<bool>(nh, "kNoExplorationReturnHome", true);
   kUseMomentum = misc_utils_ns::getParam<bool>(nh, "kUseMomentum", false);
+  kUseLowDensityPoint = misc_utils_ns::getParam<bool>(nh, "kUseLowDensityPoint", false);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -219,6 +222,30 @@ bool SensorCoveragePlanner3D::initialize(ros::NodeHandle& nh, ros::NodeHandle& n
   reset_waypoint_sub_ =
       nh.subscribe(pp_.sub_reset_waypoint_topic_, 1, &SensorCoveragePlanner3D::ResetWaypointCallback, this);
 
+  if (pp_.kUseLowDensityPoint)
+  {
+    pcd_density_map_sub_ =
+        nh.subscribe(pp_.sub_pcd_density_map_topic_, 1, &SensorCoveragePlanner3D::PCDDensityMapCallback, this);
+
+    low_density_point_ns::LowDensityGuardParameters guard_params;
+    guard_params.anchor_cell_size = misc_utils_ns::getParam<double>(nh_p, "low_density/anchor_cell_size", 3.0);
+    guard_params.dedup_voxel_size = misc_utils_ns::getParam<double>(nh_p, "low_density/dedup_voxel_size", 0.4);
+    guard_params.min_support_points = misc_utils_ns::getParam<int>(nh_p, "low_density/min_support_points", 5);
+    guard_params.neighbor_cell_radius = misc_utils_ns::getParam<int>(nh_p, "low_density/neighbor_cell_radius", 1);
+    guard_params.max_active_clusters = misc_utils_ns::getParam<int>(nh_p, "low_density/max_active_clusters", 8);
+    guard_params.max_active_points = misc_utils_ns::getParam<int>(nh_p, "low_density/max_active_points", 200);
+    guard_params.max_points_per_cluster =
+        misc_utils_ns::getParam<int>(nh_p, "low_density/max_points_per_cluster", 24);
+    guard_params.max_failures = misc_utils_ns::getParam<int>(nh_p, "low_density/max_failures", 4);
+    guard_params.cooldown_base_sec = misc_utils_ns::getParam<double>(nh_p, "low_density/cooldown_base_sec", 8.0);
+    guard_params.cooldown_max_sec = misc_utils_ns::getParam<double>(nh_p, "low_density/cooldown_max_sec", 120.0);
+    guard_params.max_age_cycles = misc_utils_ns::getParam<int>(nh_p, "low_density/max_age_cycles", 120);
+    guard_params.missing_cycles_to_forget =
+        misc_utils_ns::getParam<int>(nh_p, "low_density/missing_cycles_to_forget", 5);
+    low_density_guard_.SetParameters(guard_params);
+    ROS_INFO_STREAM("[TARE] Low-density point channel enabled: " << pp_.sub_pcd_density_map_topic_);
+  }
+
   global_path_full_publisher_ = nh.advertise<nav_msgs::Path>("global_path_full", 1);
   global_path_publisher_ = nh.advertise<nav_msgs::Path>("global_path", 1);
   old_global_path_publisher_ = nh.advertise<nav_msgs::Path>("old_global_path", 1);
@@ -233,6 +260,7 @@ bool SensorCoveragePlanner3D::initialize(ros::NodeHandle& nh, ros::NodeHandle& n
   // Debug
   pointcloud_manager_neighbor_cells_origin_pub_ =
       nh.advertise<geometry_msgs::PointStamped>("pointcloud_manager_neighbor_cells_origin", 1);
+  low_density_target_pub_ = nh.advertise<sensor_msgs::PointCloud2>("low_density_targets", 1);
 
   return true;
 }
@@ -445,6 +473,33 @@ void SensorCoveragePlanner3D::ResetWaypointCallback(const std_msgs::Empty::Const
   std::cout << "reset waypoint" << std::endl;
 }
 
+void SensorCoveragePlanner3D::PCDDensityMapCallback(const sensor_msgs::PointCloud2ConstPtr& density_map_msg)
+{
+  if (!pp_.kUseLowDensityPoint || !initialized_)
+  {
+    return;
+  }
+  // Convert to XYZ only. This tolerates PointXYZ / PointXYZI / PointXYZRGB
+  // published by the mapping node as long as x, y, z are present.
+  pcl::PointCloud<pcl::PointXYZ>::Ptr density_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::fromROSMsg(*density_map_msg, *density_cloud);
+
+  std::vector<low_density_point_ns::Point3D> points;
+  points.reserve(density_cloud->points.size());
+  for (const auto& point : density_cloud->points)
+  {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z))
+    {
+      continue;
+    }
+    points.emplace_back(point.x, point.y, point.z);
+  }
+  {
+    std::lock_guard<std::mutex> lock(low_density_mutex_);
+    low_density_raw_points_.swap(points);
+  }
+}
+
 void SensorCoveragePlanner3D::SendInitialWaypoint()
 {
   // send waypoint ahead
@@ -547,7 +602,75 @@ void SensorCoveragePlanner3D::UpdateRobotViewPointCoverage()
   }
 }
 
-void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& uncovered_frontier_point_num)
+void SensorCoveragePlanner3D::UpdateLowDensityTargets()
+{
+  low_density_targets_.clear();
+  if (!pp_.kUseLowDensityPoint)
+  {
+    pd_.local_coverage_planner_->SetUseLowDensity(false);
+    return;
+  }
+
+  std::vector<low_density_point_ns::Point3D> raw_points;
+  {
+    std::lock_guard<std::mutex> lock(low_density_mutex_);
+    raw_points = low_density_raw_points_;
+  }
+
+  // Always advance the guard state machine, even while the channel is
+  // suppressed, so cooling / abandonment keep progressing in wall-clock time.
+  low_density_guard_.Update(raw_points, ros::Time::now().toSec(), low_density_targets_);
+
+  // Low-density points must never interfere with returning home.
+  if (exploration_finished_ || pd_.grid_world_->IsReturningHome())
+  {
+    low_density_targets_.clear();
+  }
+  pd_.local_coverage_planner_->SetUseLowDensity(!low_density_targets_.empty());
+
+  pcl::PointCloud<pcl::PointXYZI>::Ptr vis_cloud(new pcl::PointCloud<pcl::PointXYZI>());
+  for (const auto& target : low_density_targets_)
+  {
+    pcl::PointXYZI point;
+    point.x = target.position.x;
+    point.y = target.position.y;
+    point.z = target.position.z;
+    point.intensity = static_cast<float>(target.weight);
+    vis_cloud->points.push_back(point);
+  }
+  sensor_msgs::PointCloud2 vis_msg;
+  pcl::toROSMsg(*vis_cloud, vis_msg);
+  vis_msg.header.frame_id = kWorldFrameID;
+  vis_msg.header.stamp = ros::Time::now();
+  low_density_target_pub_.publish(vis_msg);
+}
+
+void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
+{
+  if (!pp_.kUseLowDensityPoint)
+  {
+    return;
+  }
+  const std::vector<int>& serviced_indices = pd_.local_coverage_planner_->GetServicedLowDensityPointIndices();
+  if (serviced_indices.empty())
+  {
+    return;
+  }
+  const std::vector<uint64_t>& cluster_keys = pd_.planning_env_->GetLowDensityTargetClusterKeys();
+  std::vector<uint64_t> keys;
+  keys.reserve(serviced_indices.size());
+  for (int idx : serviced_indices)
+  {
+    if (idx >= 0 && idx < static_cast<int>(cluster_keys.size()))
+    {
+      keys.push_back(cluster_keys[idx]);
+    }
+  }
+  low_density_guard_.NoteServiced(keys);
+}
+
+void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& uncovered_frontier_point_num,
+                                                int& uncovered_low_density_point_num)
 {
   // Update covered area
   misc_utils_ns::Timer update_coverage_area_timer("update covered area");
@@ -556,10 +679,12 @@ void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& 
   update_coverage_area_timer.Stop(false);
   misc_utils_ns::Timer get_uncovered_area_timer("get uncovered area");
   get_uncovered_area_timer.Start();
-  pd_.planning_env_->GetUncoveredArea(pd_.viewpoint_manager_, uncovered_point_num, uncovered_frontier_point_num);
+  pd_.planning_env_->GetUncoveredArea(pd_.viewpoint_manager_, low_density_targets_, uncovered_point_num,
+                                      uncovered_frontier_point_num, uncovered_low_density_point_num);
   get_uncovered_area_timer.Stop(false);
   pd_.planning_env_->PublishUncoveredCloud();
   pd_.planning_env_->PublishUncoveredFrontierCloud();
+  pd_.planning_env_->PublishUncoveredLowDensityCloud();
 }
 
 void SensorCoveragePlanner3D::UpdateVisitedPositions()
@@ -720,6 +845,7 @@ void SensorCoveragePlanner3D::PublishGlobalPlanningVisualization(
 }
 
 void SensorCoveragePlanner3D::LocalPlanning(int uncovered_point_num, int uncovered_frontier_point_num,
+                                            int uncovered_low_density_point_num,
                                             const exploration_path_ns::ExplorationPath& global_path,
                                             exploration_path_ns::ExplorationPath& local_path)
 {
@@ -729,8 +855,8 @@ void SensorCoveragePlanner3D::LocalPlanning(int uncovered_point_num, int uncover
   {
     pd_.local_coverage_planner_->SetLookAheadPoint(pd_.lookahead_point_);
   }
-  local_path = pd_.local_coverage_planner_->SolveLocalCoverageProblem(global_path, uncovered_point_num,
-                                                                      uncovered_frontier_point_num);
+  local_path = pd_.local_coverage_planner_->SolveLocalCoverageProblem(
+      global_path, uncovered_point_num, uncovered_frontier_point_num, uncovered_low_density_point_num);
   local_tsp_timer.Stop(false);
 }
 
@@ -1318,10 +1444,12 @@ void SensorCoveragePlanner3D::execute(const ros::TimerEvent&)
 
     int uncovered_point_num = 0;
     int uncovered_frontier_point_num = 0;
+    int uncovered_low_density_point_num = 0;
+    UpdateLowDensityTargets();
     if (!exploration_finished_ || !pp_.kNoExplorationReturnHome)
     {
       UpdateViewPointCoverage();
-      UpdateCoveredAreas(uncovered_point_num, uncovered_frontier_point_num);
+      UpdateCoveredAreas(uncovered_point_num, uncovered_frontier_point_num, uncovered_low_density_point_num);
     }
     else
     {
@@ -1338,7 +1466,9 @@ void SensorCoveragePlanner3D::execute(const ros::TimerEvent&)
 
     // Local TSP
     exploration_path_ns::ExplorationPath local_path;
-    LocalPlanning(uncovered_point_num, uncovered_frontier_point_num, global_path, local_path);
+    LocalPlanning(uncovered_point_num, uncovered_frontier_point_num, uncovered_low_density_point_num, global_path,
+                  local_path);
+    FeedbackLowDensityServiced();
 
     near_home_ = GetRobotToHomeDistance() < pp_.kRushHomeDist;
     at_home_ = GetRobotToHomeDistance() < pp_.kAtHomeDistThreshold;

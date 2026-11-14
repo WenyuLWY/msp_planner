@@ -1135,6 +1135,7 @@ void ViewPointManager::ResetViewPointCoveredPointList(int viewpoint_ind, bool us
   int array_ind = GetViewPointArrayInd(viewpoint_ind, use_array_ind);
   viewpoints_[array_ind].ResetCoveredPointList();
   viewpoints_[array_ind].ResetCoveredFrontierPointList();
+  viewpoints_[array_ind].ResetCoveredLowDensityPointList();
 }
 void ViewPointManager::AddUncoveredPoint(int viewpoint_ind, int point_ind, bool use_array_ind)
 {
@@ -1215,6 +1216,50 @@ void ViewPointManager::UpdateViewPointCoveredFrontierPoint(std::vector<bool>& fr
   {
     MY_ASSERT(misc_utils_ns::InRange<bool>(frontier_point_list, point_ind));
     frontier_point_list[point_ind] = true;
+  }
+}
+
+void ViewPointManager::AddUncoveredLowDensityPoint(int viewpoint_ind, int point_ind, bool use_array_ind)
+{
+  int array_ind = GetViewPointArrayInd(viewpoint_ind, use_array_ind);
+  viewpoints_[array_ind].AddCoveredLowDensityPoint(point_ind);
+}
+
+const std::vector<int>& ViewPointManager::GetViewPointCoveredLowDensityPointList(int viewpoint_ind,
+                                                                               bool use_array_ind) const
+{
+  int array_ind = GetViewPointArrayInd(viewpoint_ind, use_array_ind);
+  return viewpoints_[array_ind].GetCoveredLowDensityPointList();
+}
+
+int ViewPointManager::GetViewPointCoveredLowDensityPointNum(int viewpoint_ind, bool use_array_ind)
+{
+  int array_ind = GetViewPointArrayInd(viewpoint_ind, use_array_ind);
+  return viewpoints_[array_ind].GetCoveredLowDensityPointNum();
+}
+
+int ViewPointManager::GetViewPointCoveredLowDensityPointNum(const std::vector<bool>& point_list,
+                                                           int viewpoint_index, bool use_array_ind)
+{
+  int covered_point_num = 0;
+  for (const auto& point_ind : GetViewPointCoveredLowDensityPointList(viewpoint_index, use_array_ind))
+  {
+    MY_ASSERT(misc_utils_ns::InRange<bool>(point_list, point_ind));
+    if (!point_list[point_ind])
+    {
+      covered_point_num++;
+    }
+  }
+  return covered_point_num;
+}
+
+void ViewPointManager::UpdateViewPointCoveredLowDensityPoint(std::vector<bool>& point_list, int viewpoint_index,
+                                                            bool use_array_ind)
+{
+  for (const auto& point_ind : GetViewPointCoveredLowDensityPointList(viewpoint_index, use_array_ind))
+  {
+    MY_ASSERT(misc_utils_ns::InRange<bool>(point_list, point_ind));
+    point_list[point_ind] = true;
   }
 }
 

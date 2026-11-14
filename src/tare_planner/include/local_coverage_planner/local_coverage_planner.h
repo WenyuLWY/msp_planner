@@ -25,6 +25,8 @@ struct LocalCoveragePlannerParameter
 {
   int kMinAddPointNum;
   int kMinAddFrontierPointNum;
+  int kMinAddLowDensityPointNum;
+  int kMaxLowDensityViewPointNum;
   int kGreedyViewPointSampleRange;
   int kLocalPathOptimizationItrMax;
 
@@ -55,7 +57,7 @@ public:
   }
   exploration_path_ns::ExplorationPath
   SolveLocalCoverageProblem(const exploration_path_ns::ExplorationPath& global_path, int uncovered_point_num,
-                            int uncovered_frontier_point_num = 0);
+                            int uncovered_frontier_point_num = 0, int uncovered_low_density_point_num = 0);
 
   // Runtime
   int GetFindPathRuntime()
@@ -76,6 +78,17 @@ public:
     return local_coverage_complete_;
   }
 
+  // Enables/disables the third (externally published low-density point) channel.
+  void SetUseLowDensity(bool use_low_density)
+  {
+    use_low_density_ = use_low_density;
+  }
+  // Indices of low-density targets covered by the final TSP viewpoints this cycle.
+  const std::vector<int>& GetServicedLowDensityPointIndices() const
+  {
+    return serviced_low_density_point_indices_;
+  }
+
   // Visualization
   void GetSelectedViewPointVisCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud);
 
@@ -90,8 +103,10 @@ private:
 
   void EnqueueViewpointCandidates(std::vector<std::pair<int, int>>& cover_point_queue,
                                   std::vector<std::pair<int, int>>& frontier_queue,
+                                  std::vector<std::pair<int, int>>& low_density_queue,
                                   const std::vector<bool>& covered_point_list,
                                   const std::vector<bool>& covered_frontier_point_list,
+                                  const std::vector<bool>& covered_low_density_point_list,
                                   const std::vector<int>& selected_viewpoint_array_indices);
 
   void SelectViewPoint(const std::vector<std::pair<int, int>>& queue, const std::vector<bool>& covered,
@@ -99,6 +114,10 @@ private:
   void SelectViewPointFromFrontierQueue(std::vector<std::pair<int, int>>& frontier_queue,
                                         std::vector<bool>& frontier_covered,
                                         std::vector<int>& selected_viewpoint_indices);
+  void SelectViewPointFromLowDensityQueue(const std::vector<std::pair<int, int>>& low_density_queue,
+                                          const std::vector<bool>& low_density_covered,
+                                          std::vector<int>& selected_viewpoint_indices);
+  void UpdateViewPointCoveredLowDensityPoint(std::vector<bool>& low_density_point_list, int viewpoint_index);
   exploration_path_ns::ExplorationPath SolveTSP(const std::vector<int>& selected_viewpoint_indices,
                                                 std::vector<int>& ordered_viewpoint_indices);
 
@@ -116,6 +135,7 @@ private:
 
   bool lookahead_point_update_;
   bool use_frontier_;
+  bool use_low_density_;
   bool local_coverage_complete_;
 
   // Viewpoint indices
@@ -132,5 +152,6 @@ private:
 
   std::vector<int> last_selected_viewpoint_indices_;
   std::vector<int> last_selected_viewpoint_array_indices_;
+  std::vector<int> serviced_low_density_point_indices_;
 };
 }  // namespace local_coverage_planner_ns

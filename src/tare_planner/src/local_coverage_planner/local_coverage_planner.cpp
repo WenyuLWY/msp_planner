@@ -19,13 +19,18 @@ bool LocalCoveragePlannerParameter::ReadParameters(ros::NodeHandle& nh)
 {
   kMinAddPointNum = misc_utils_ns::getParam<int>(nh, "kMinAddPointNumSmall", 60);
   kMinAddFrontierPointNum = misc_utils_ns::getParam<int>(nh, "kMinAddFrontierPointNum", 30);
+  kMinAddLowDensityPointNum = misc_utils_ns::getParam<int>(nh, "kMinAddLowDensityPointNum", 15);
+  kMaxLowDensityViewPointNum = misc_utils_ns::getParam<int>(nh, "kMaxLowDensityViewPointNum", 2);
   kGreedyViewPointSampleRange = misc_utils_ns::getParam<int>(nh, "kGreedyViewPointSampleRange", 5);
   kLocalPathOptimizationItrMax = misc_utils_ns::getParam<int>(nh, "kLocalPathOptimizationItrMax", 10);
 
   return true;
 }
 LocalCoveragePlanner::LocalCoveragePlanner(ros::NodeHandle& nh)
-  : lookahead_point_update_(false), use_frontier_(true), local_coverage_complete_(false)
+  : lookahead_point_update_(false)
+  , use_frontier_(true)
+  , use_low_density_(false)
+  , local_coverage_complete_(false)
 {
   parameters_.ReadParameters(nh);
 }
@@ -97,11 +102,76 @@ void LocalCoveragePlanner::UpdateViewPointCoveredFrontierPoint(std::vector<bool>
     frontier_point_list[point_ind] = true;
   }
 }
+void LocalCoveragePlanner::UpdateViewPointCoveredLowDensityPoint(std::vector<bool>& low_density_point_list,
+                                                                 int viewpoint_index)
+{
+  for (const auto& point_ind : viewpoint_manager_->GetViewPointCoveredLowDensityPointList(viewpoint_index))
+  {
+    MY_ASSERT(misc_utils_ns::InRange<bool>(low_density_point_list, point_ind));
+    low_density_point_list[point_ind] = true;
+  }
+}
+
+void LocalCoveragePlanner::SelectViewPointFromLowDensityQueue(
+    const std::vector<std::pair<int, int>>& low_density_queue, const std::vector<bool>& low_density_covered,
+    std::vector<int>& selected_viewpoint_indices)
+{
+  if (!use_low_density_ || low_density_queue.empty())
+  {
+    return;
+  }
+
+  // Work on copies so repeated local path optimization iterations stay independent.
+  std::vector<bool> covered(low_density_covered.begin(), low_density_covered.end());
+  for (const auto& ind : selected_viewpoint_indices)
+  {
+    UpdateViewPointCoveredLowDensityPoint(covered, ind);
+  }
+
+  std::vector<std::pair<int, int>> queue;
+  for (const auto& candidate : low_density_queue)
+  {
+    if (std::find(selected_viewpoint_indices.begin(), selected_viewpoint_indices.end(), candidate.second) !=
+        selected_viewpoint_indices.end())
+    {
+      continue;
+    }
+    int array_ind = viewpoint_manager_->GetViewPointArrayInd(candidate.second);
+    int gain = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(covered, array_ind, true);
+    if (gain >= parameters_.kMinAddLowDensityPointNum)
+    {
+      queue.emplace_back(gain, candidate.second);
+    }
+  }
+  std::sort(queue.begin(), queue.end(), SortPairInRev);
+
+  // Bound the number of extra viewpoints per cycle: low-density points are a
+  // secondary objective and must never dominate the exploration path.
+  for (int i = 0; i < parameters_.kMaxLowDensityViewPointNum && !queue.empty(); i++)
+  {
+    if (queue[0].first < parameters_.kMinAddLowDensityPointNum)
+    {
+      break;
+    }
+    int selected_ind = queue[0].second;
+    selected_viewpoint_indices.push_back(selected_ind);
+    UpdateViewPointCoveredLowDensityPoint(covered, selected_ind);
+    queue.erase(queue.begin());
+    for (auto& entry : queue)
+    {
+      int array_ind = viewpoint_manager_->GetViewPointArrayInd(entry.second);
+      entry.first = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(covered, array_ind, true);
+    }
+    std::sort(queue.begin(), queue.end(), SortPairInRev);
+  }
+}
 
 void LocalCoveragePlanner::EnqueueViewpointCandidates(std::vector<std::pair<int, int>>& cover_point_queue,
                                                       std::vector<std::pair<int, int>>& frontier_queue,
+                                                      std::vector<std::pair<int, int>>& low_density_queue,
                                                       const std::vector<bool>& covered_point_list,
                                                       const std::vector<bool>& covered_frontier_point_list,
+                                                      const std::vector<bool>& covered_low_density_point_list,
                                                       const std::vector<int>& selected_viewpoint_array_indices)
 {
   for (const auto& viewpoint_index : viewpoint_manager_->GetViewPointCandidateIndices())
@@ -132,6 +202,18 @@ void LocalCoveragePlanner::EnqueueViewpointCandidates(std::vector<std::pair<int,
         frontier_queue.emplace_back(covered_frontier_point_num, viewpoint_index);
       }
     }
+
+    // Independent third channel: a viewpoint can be queued for both surface
+    // points and low-density points. Duplicates are removed later.
+    if (use_low_density_)
+    {
+      int covered_low_density_point_num = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(
+          covered_low_density_point_list, viewpoint_array_index, true);
+      if (covered_low_density_point_num >= parameters_.kMinAddLowDensityPointNum)
+      {
+        low_density_queue.emplace_back(covered_low_density_point_num, viewpoint_index);
+      }
+    }
   }
 
   // Sort the queue
@@ -140,6 +222,7 @@ void LocalCoveragePlanner::EnqueueViewpointCandidates(std::vector<std::pair<int,
   {
     std::sort(frontier_queue.begin(), frontier_queue.end(), SortPairInRev);
   }
+  std::sort(low_density_queue.begin(), low_density_queue.end(), SortPairInRev);
 }
 
 void LocalCoveragePlanner::SelectViewPoint(const std::vector<std::pair<int, int>>& queue,
@@ -631,7 +714,8 @@ exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveTSP(const std::v
 }
 
 exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveLocalCoverageProblem(
-    const exploration_path_ns::ExplorationPath& global_path, int uncovered_point_num, int uncovered_frontier_point_num)
+    const exploration_path_ns::ExplorationPath& global_path, int uncovered_point_num, int uncovered_frontier_point_num,
+    int uncovered_low_density_point_num)
 {
   exploration_path_ns::ExplorationPath local_path;
 
@@ -656,6 +740,7 @@ exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveLocalCoveragePro
 
   std::vector<bool> covered(uncovered_point_num, false);
   std::vector<bool> frontier_covered(uncovered_frontier_point_num, false);
+  std::vector<bool> low_density_covered(uncovered_low_density_point_num, false);
 
   std::vector<int> pre_selected_viewpoint_array_indices;
   std::vector<int> reused_viewpoint_indices;
@@ -702,12 +787,18 @@ exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveLocalCoveragePro
     {
       UpdateViewPointCoveredFrontierPoint(frontier_covered, viewpoint_array_ind, true);
     }
+    if (use_low_density_)
+    {
+      viewpoint_manager_->UpdateViewPointCoveredLowDensityPoint(low_density_covered, viewpoint_array_ind, true);
+    }
   }
 
   // Enqueue candidate viewpoints
   std::vector<std::pair<int, int>> queue;
   std::vector<std::pair<int, int>> frontier_queue;
-  EnqueueViewpointCandidates(queue, frontier_queue, covered, frontier_covered, pre_selected_viewpoint_array_indices);
+  std::vector<std::pair<int, int>> low_density_queue;
+  EnqueueViewpointCandidates(queue, frontier_queue, low_density_queue, covered, frontier_covered, low_density_covered,
+                             pre_selected_viewpoint_array_indices);
 
   viewpoint_sampling_timer.Stop(false, kRuntimeUnit);
   viewpoint_sampling_runtime_ += viewpoint_sampling_timer.GetDuration(kRuntimeUnit);
@@ -725,6 +816,7 @@ exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveLocalCoveragePro
       select_viewpoint_timer.Start();
       SelectViewPoint(queue, covered, selected_viewpoint_indices_itr, false);
       SelectViewPointFromFrontierQueue(frontier_queue, frontier_covered, selected_viewpoint_indices_itr);
+      SelectViewPointFromLowDensityQueue(low_density_queue, low_density_covered, selected_viewpoint_indices_itr);
 
       // Add viewpoints from last planning cycle
       for (const auto& ind : reused_viewpoint_indices)
@@ -770,7 +862,12 @@ exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveLocalCoveragePro
     }
     SelectViewPointFromFrontierQueue(frontier_queue, frontier_covered, selected_viewpoint_indices_itr);
 
-    if (selected_viewpoint_indices_itr.empty())
+    // Low-density points are a secondary objective and must NOT affect the
+    // exploration-completion definition. Evaluate completion on the regular
+    // channels only, before appending any low-density viewpoints.
+    const bool no_regular_coverage_left = selected_viewpoint_indices_itr.empty();
+    SelectViewPointFromLowDensityQueue(low_density_queue, low_density_covered, selected_viewpoint_indices_itr);
+    if (no_regular_coverage_left)
     {
       local_coverage_complete_ = true;
     }
@@ -808,6 +905,36 @@ exploration_path_ns::ExplorationPath LocalCoveragePlanner::SolveLocalCoveragePro
         viewpoint_index != end_viewpoint_ind_ && viewpoint_index != lookahead_viewpoint_ind_)
     {
       viewpoint_manager_->SetViewPointSelected(viewpoint_index, true);
+    }
+  }
+
+  // Report which low-density targets the final path will actually service.
+  // The main node maps these indices back to stable cluster keys and feeds
+  // them to the guard's failed-attempt counter.
+  serviced_low_density_point_indices_.clear();
+  if (use_low_density_ && uncovered_low_density_point_num > 0)
+  {
+    std::vector<bool> serviced(uncovered_low_density_point_num, false);
+    for (const auto& viewpoint_ind : last_selected_viewpoint_indices_)
+    {
+      if (!viewpoint_manager_->InRange(viewpoint_ind))
+      {
+        continue;
+      }
+      for (const auto& point_ind : viewpoint_manager_->GetViewPointCoveredLowDensityPointList(viewpoint_ind))
+      {
+        if (point_ind >= 0 && point_ind < uncovered_low_density_point_num)
+        {
+          serviced[point_ind] = true;
+        }
+      }
+    }
+    for (int i = 0; i < uncovered_low_density_point_num; i++)
+    {
+      if (serviced[i])
+      {
+        serviced_low_density_point_indices_.push_back(i);
+      }
     }
   }
 

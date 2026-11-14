@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <vector>
+#include <mutex>
 
 #include <Eigen/Core>
 // ROS
@@ -51,6 +52,7 @@
 #include "local_coverage_planner/local_coverage_planner.h"
 #include "tare_visualizer/tare_visualizer.h"
 #include "rolling_occupancy_grid/rolling_occupancy_grid.h"
+#include <low_density_point/low_density_point_guard.h>
 
 #define cursup "\033[A"
 #define cursclean "\033[2K"
@@ -77,6 +79,7 @@ struct PlannerParameters
   std::string sub_nogo_boundary_topic_;
   std::string sub_joystick_topic_;
   std::string sub_reset_waypoint_topic_;
+  std::string sub_pcd_density_map_topic_;
 
   std::string pub_exploration_finish_topic_;
   std::string pub_runtime_breakdown_topic_;
@@ -93,6 +96,7 @@ struct PlannerParameters
   bool kUseLineOfSightLookAheadPoint;
   bool kNoExplorationReturnHome;
   bool kUseMomentum;
+  bool kUseLowDensityPoint;
 
   // Double
   double kKeyposeCloudDwzFilterLeafSize;
@@ -187,6 +191,12 @@ private:
   bool reset_waypoint_;
   PlannerParameters pp_;
   PlannerData pd_;
+
+  // Externally published low-density points and their give-up policy.
+  low_density_point_ns::LowDensityPointGuard low_density_guard_;
+  std::vector<low_density_point_ns::Point3D> low_density_raw_points_;
+  std::vector<low_density_point_ns::LowDensityTarget> low_density_targets_;
+  std::mutex low_density_mutex_;
   pointcloud_utils_ns::PointCloudDownsizer<pcl::PointXYZ> pointcloud_downsizer_;
 
   int update_representation_runtime_;
@@ -219,6 +229,7 @@ private:
   ros::Subscriber nogo_boundary_sub_;
   ros::Subscriber joystick_sub_;
   ros::Subscriber reset_waypoint_sub_;
+  ros::Subscriber pcd_density_map_sub_;
 
   // ROS publishers
   ros::Publisher global_path_full_publisher_;
@@ -234,6 +245,7 @@ private:
   ros::Publisher momentum_activation_count_pub_;
   // Debug
   ros::Publisher pointcloud_manager_neighbor_cells_origin_pub_;
+  ros::Publisher low_density_target_pub_;
 
   // Callback functions
   void ExplorationStartCallback(const std_msgs::Bool::ConstPtr& start_msg);
@@ -246,20 +258,24 @@ private:
   void NogoBoundaryCallback(const geometry_msgs::PolygonStampedConstPtr& polygon_msg);
   void JoystickCallback(const sensor_msgs::Joy::ConstPtr& joy_msg);
   void ResetWaypointCallback(const std_msgs::Empty::ConstPtr& empty_msg);
+  void PCDDensityMapCallback(const sensor_msgs::PointCloud2ConstPtr& density_map_msg);
 
   void SendInitialWaypoint();
   void UpdateKeyposeGraph();
   int UpdateViewPoints();
   void UpdateViewPointCoverage();
   void UpdateRobotViewPointCoverage();
-  void UpdateCoveredAreas(int& uncovered_point_num, int& uncovered_frontier_point_num);
+  void UpdateCoveredAreas(int& uncovered_point_num, int& uncovered_frontier_point_num,
+                          int& uncovered_low_density_point_num);
+  void UpdateLowDensityTargets();
+  void FeedbackLowDensityServiced();
   void UpdateVisitedPositions();
   void UpdateGlobalRepresentation();
   void GlobalPlanning(std::vector<int>& global_cell_tsp_order, exploration_path_ns::ExplorationPath& global_path);
   void PublishGlobalPlanningVisualization(const exploration_path_ns::ExplorationPath& global_path,
                                           const exploration_path_ns::ExplorationPath& local_path);
   void LocalPlanning(int uncovered_point_num, int uncovered_frontier_point_num,
-                     const exploration_path_ns::ExplorationPath& global_path,
+                     int uncovered_low_density_point_num, const exploration_path_ns::ExplorationPath& global_path,
                      exploration_path_ns::ExplorationPath& local_path);
   void PublishLocalPlanningVisualization(const exploration_path_ns::ExplorationPath& local_path);
   exploration_path_ns::ExplorationPath ConcatenateGlobalLocalPath(

@@ -13,6 +13,7 @@
 #include <cmath>
 #include <vector>
 #include <memory>
+#include <cstdint>
 #include <Eigen/Core>
 // ROS
 #include <geometry_msgs/Point.h>
@@ -31,6 +32,7 @@
 #include <pointcloud_manager/pointcloud_manager.h>
 #include <lidar_model/lidar_model.h>
 #include "rolling_occupancy_grid/rolling_occupancy_grid.h"
+#include <low_density_point/low_density_point_guard.h>
 
 namespace viewpoint_manager_ns
 {
@@ -73,6 +75,8 @@ struct planning_env_ns::PlanningEnvParameters
   // Boundary
   bool kUseCoverageBoundaryOnFrontier;
   bool kUseCoverageBoundaryOnObjectSurface;
+  // Minimum gain weight for an externally published low-density target.
+  double kMinLowDensityTargetWeight;
 
   void ReadParameters(ros::NodeHandle& nh);
 };
@@ -294,7 +298,14 @@ public:
                          const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager);
 
   void GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager,
-                        int& uncovered_point_num, int& uncovered_frontier_point_num);
+                        const std::vector<low_density_point_ns::LowDensityTarget>& low_density_targets,
+                        int& uncovered_point_num, int& uncovered_frontier_point_num,
+                        int& uncovered_low_density_point_num);
+  // Aligned with the uncovered low-density point indices (for NoteServiced feedback).
+  const std::vector<uint64_t>& GetLowDensityTargetClusterKeys() const
+  {
+    return low_density_target_cluster_keys_;
+  }
 
   Eigen::Vector3d GetPointCloudManagerNeighborCellsOrigin()
   {
@@ -304,6 +315,7 @@ public:
   void PublishStackedCloud();
   void PublishUncoveredCloud();
   void PublishUncoveredFrontierCloud();
+  void PublishUncoveredLowDensityCloud();
 
 private:
   PlanningEnvParameters parameters_;
@@ -348,6 +360,8 @@ private:
 
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_frontier_cloud_;
+  std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_low_density_cloud_;
+  std::vector<uint64_t> low_density_target_cluster_keys_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> filtered_frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> occupied_cloud_;

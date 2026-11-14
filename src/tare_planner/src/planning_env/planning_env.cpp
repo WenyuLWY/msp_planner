@@ -40,6 +40,7 @@ void PlanningEnvParameters::ReadParameters(ros::NodeHandle& nh)
 
   kUseCoverageBoundaryOnFrontier = misc_utils_ns::getParam<bool>(nh, "kUseCoverageBoundaryOnFrontier", false);
   kUseCoverageBoundaryOnObjectSurface = misc_utils_ns::getParam<bool>(nh, "kUseCoverageBoundaryOnObjectSurface", false);
+  kMinLowDensityTargetWeight = misc_utils_ns::getParam<double>(nh, "kMinLowDensityTargetWeight", 0.2);
 
   int viewpoint_number = misc_utils_ns::getParam<int>(nh, "viewpoint_manager/number_x", 40);
   double viewpoint_resolution = misc_utils_ns::getParam<double>(nh, "viewpoint_manager/resolution_x", 1.0);
@@ -107,6 +108,8 @@ PlanningEnv::PlanningEnv(ros::NodeHandle nh, ros::NodeHandle nh_private, std::st
       std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(nh, "uncovered_cloud", world_frame_id);
   uncovered_frontier_cloud_ =
       std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(nh, "uncovered_frontier_cloud", world_frame_id);
+  uncovered_low_density_cloud_ = std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
+      nh, "uncovered_low_density_cloud", world_frame_id);
   frontier_cloud_ =
       std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(nh, "frontier_cloud", world_frame_id);
   filtered_frontier_cloud_ =
@@ -355,7 +358,9 @@ void PlanningEnv::UpdateCoveredArea(const lidar_model_ns::LiDARModel& robot_view
 }
 
 void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager,
-                                   int& uncovered_point_num, int& uncovered_frontier_point_num)
+                                   const std::vector<low_density_point_ns::LowDensityTarget>& low_density_targets,
+                                   int& uncovered_point_num, int& uncovered_frontier_point_num,
+                                   int& uncovered_low_density_point_num)
 {
   // Clear viewpoint covered point list
   for (const auto& viewpoint_ind : viewpoint_manager->candidate_indices_)
@@ -366,8 +371,11 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
   // Get uncovered points
   uncovered_cloud_->cloud_->clear();
   uncovered_frontier_cloud_->cloud_->clear();
+  uncovered_low_density_cloud_->cloud_->clear();
+  low_density_target_cluster_keys_.clear();
   uncovered_point_num = 0;
   uncovered_frontier_point_num = 0;
+  uncovered_low_density_point_num = 0;
   for (int i = 0; i < planner_cloud_->cloud_->points.size(); i++)
   {
     PlannerCloudPointType point = planner_cloud_->cloud_->points[i];
@@ -429,6 +437,40 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
       }
     }
   }
+
+  // Check externally published low-density points. These are refreshed by an
+  // external node, so there is no internal "covered" flag: only the targets
+  // that survive the guard's give-up policy reach this loop.
+  for (const auto& target : low_density_targets)
+  {
+    if (target.weight < parameters_.kMinLowDensityTargetWeight)
+    {
+      continue;
+    }
+    bool observed = false;
+    for (const auto& viewpoint_ind : viewpoint_manager->candidate_indices_)
+    {
+      if (!viewpoint_manager->ViewPointVisited(viewpoint_ind))
+      {
+        if (viewpoint_manager->VisibleByViewPoint<low_density_point_ns::Point3D>(target.position, viewpoint_ind))
+        {
+          viewpoint_manager->AddUncoveredLowDensityPoint(viewpoint_ind, uncovered_low_density_point_num);
+          observed = true;
+        }
+      }
+    }
+    if (observed)
+    {
+      pcl::PointXYZI uncovered_low_density_point;
+      uncovered_low_density_point.x = target.position.x;
+      uncovered_low_density_point.y = target.position.y;
+      uncovered_low_density_point.z = target.position.z;
+      uncovered_low_density_point.intensity = static_cast<float>(target.weight);
+      uncovered_low_density_cloud_->cloud_->points.push_back(uncovered_low_density_point);
+      low_density_target_cluster_keys_.push_back(target.cluster_key);
+      uncovered_low_density_point_num++;
+    }
+  }
 }
 
 void PlanningEnv::GetVisualizationPointCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr vis_cloud)
@@ -449,6 +491,11 @@ void PlanningEnv::PublishUncoveredCloud()
 void PlanningEnv::PublishUncoveredFrontierCloud()
 {
   uncovered_frontier_cloud_->Publish();
+}
+
+void PlanningEnv::PublishUncoveredLowDensityCloud()
+{
+  uncovered_low_density_cloud_->Publish();
 }
 
 }  // namespace planning_env_ns
