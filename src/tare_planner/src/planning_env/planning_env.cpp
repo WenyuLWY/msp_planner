@@ -40,7 +40,7 @@ void PlanningEnvParameters::ReadParameters(ros::NodeHandle& nh)
 
   kUseCoverageBoundaryOnFrontier = misc_utils_ns::getParam<bool>(nh, "kUseCoverageBoundaryOnFrontier", false);
   kUseCoverageBoundaryOnObjectSurface = misc_utils_ns::getParam<bool>(nh, "kUseCoverageBoundaryOnObjectSurface", false);
-  kMinLowDensityTargetWeight = misc_utils_ns::getParam<double>(nh, "kMinLowDensityTargetWeight", 0.2);
+  kMinLowDensityTargetWeight = misc_utils_ns::getParam<double>(nh, "kMinLowDensityTargetWeight", 0.1);
 
   int viewpoint_number = misc_utils_ns::getParam<int>(nh, "viewpoint_manager/number_x", 40);
   double viewpoint_resolution = misc_utils_ns::getParam<double>(nh, "viewpoint_manager/resolution_x", 1.0);
