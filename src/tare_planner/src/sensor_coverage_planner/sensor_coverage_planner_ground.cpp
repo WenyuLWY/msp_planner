@@ -13,7 +13,6 @@
 #include "graph/graph.h"
 
 #include <cfloat>
-#include <limits>
 
 namespace sensor_coverage_planner_3d_ns
 {
@@ -62,8 +61,8 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kLowDensityFinishHysteresisCycles =
       misc_utils_ns::getParam<int>(nh, "kLowDensityFinishHysteresisCycles", 10);
   kLowDensityStaleMsgSec = misc_utils_ns::getParam<double>(nh, "kLowDensityStaleMsgSec", 5.0);
-  kLowDensityNoProgressSec = misc_utils_ns::getParam<double>(nh, "kLowDensityNoProgressSec", 60.0);
-  kLowDensityProgressDelta = misc_utils_ns::getParam<int>(nh, "kLowDensityProgressDelta", 2);
+  kLowDensityNoProgressSec = misc_utils_ns::getParam<double>(nh, "kLowDensityNoProgressSec", 90.0);
+  kLowDensityProgressDistance = misc_utils_ns::getParam<double>(nh, "kLowDensityProgressDistance", 3.0);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -202,8 +201,9 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , low_density_prev_has_gain_(false)
   , low_density_no_work_cycles_(0)
   , low_density_last_msg_sec_(-1.0)
-  , low_density_min_raw_(std::numeric_limits<int>::max())
   , low_density_last_progress_sec_(-1.0)
+  , low_density_progress_pos_valid_(false)
+  , low_density_no_viewpoint_cycles_(0)
 {
   initialize(nh, nh_p);
   PrintExplorationStatus("Exploration Started", false);
@@ -662,7 +662,8 @@ void SensorCoveragePlanner3D::UpdateLowDensityTargets()
 
   // Always advance the guard, even while suppressed, so cooling and
   // abandonment keep progressing in wall-clock time.
-  low_density_guard_.Update(raw_points, now_sec, low_density_targets_);
+  low_density_point_ns::Point3D robot_position(pd_.robot_position_.x, pd_.robot_position_.y, pd_.robot_position_.z);
+  low_density_guard_.Update(raw_points, now_sec, robot_position, low_density_targets_);
 
   // Hard cap on the post-exploration extension. The clock is monotonic on
   // purpose: injecting low-density cells turns IsReturningHome() back to
@@ -726,23 +727,6 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   }
   const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
 
-  // Real progress = the publisher's GLOBAL low-density count reaching a new
-  // low. msp accumulates a global map, so a few dozen unreachable points
-  // (wall backs, ceilings, grazing edges) remain forever. "Publisher still
-  // sending points" alone therefore cannot be the completion signal: it made
-  // pending stay true forever while the robot sat still with l=0.
-  if (diag.raw_point_num < low_density_min_raw_ - pp_.kLowDensityProgressDelta)
-  {
-    low_density_min_raw_ = diag.raw_point_num;
-    low_density_last_progress_sec_ = now_sec;
-  }
-  else if (low_density_last_progress_sec_ < 0.0)
-  {
-    low_density_last_progress_sec_ = now_sec;
-  }
-  const bool no_progress = low_density_last_progress_sec_ >= 0.0 &&
-                           (now_sec - low_density_last_progress_sec_) > pp_.kLowDensityNoProgressSec;
-
   // The external publisher is the authority on whether work remains. Guard
   // cooling deliberately blanks targets for a few cycles; using targets (or
   // even gain) as the finish signal lets ONE such frame latch the
@@ -760,6 +744,52 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   }
   const bool idle_long_enough = low_density_no_work_cycles_ >= pp_.kLowDensityFinishHysteresisCycles;
 
+  // Progress is measured by what the ROBOT actually did, NOT by the size of
+  // the density map. msp publishes a GLOBAL, ACCUMULATING map: every new scan
+  // inserts fresh isolated voxels while re-scanning erases resolved ones, so
+  // raw_point_num is non-monotonic (this run went 174 -> 85 -> 265). The old
+  // running-minimum test latched onto an early dip of 49 and then fired
+  // "no progress" 60 s later at t=140.7, ending the run while 250+ points
+  // were still being published. That was the direct cause of the stop.
+  if (!low_density_progress_pos_valid_)
+  {
+    low_density_progress_pos_valid_ = true;
+    low_density_last_progress_pos_ = pd_.robot_position_;
+    low_density_last_progress_sec_ = now_sec;
+  }
+  else
+  {
+    const double dx = pd_.robot_position_.x - low_density_last_progress_pos_.x;
+    const double dy = pd_.robot_position_.y - low_density_last_progress_pos_.y;
+    const double dz = pd_.robot_position_.z - low_density_last_progress_pos_.z;
+    // Net displacement from the anchor, so back-and-forth jitter in place
+    // never accumulates into "progress".
+    if (std::sqrt(dx * dx + dy * dy + dz * dz) > pp_.kLowDensityProgressDistance)
+    {
+      low_density_last_progress_pos_ = pd_.robot_position_;
+      low_density_last_progress_sec_ = now_sec;
+    }
+  }
+  const bool no_progress = (now_sec - low_density_last_progress_sec_) > pp_.kLowDensityNoProgressSec;
+
+  // A second, semantic completion signal: the guard has retired every cluster
+  // it knows about (all abandoned or gone, none cooling). Combined with the
+  // give-up policy this is the "nothing reachable left, go home" condition.
+  // Only accumulate the "retired" counter while the publisher is actually
+  // fresh. Otherwise a short dropout burns through the hysteresis and the
+  // run ends the instant messages resume.
+  const bool guard_exhausted = fresh && diag.active_cell_num == 0 && diag.cooling_cell_num == 0 &&
+                               diag.output_point_num == 0;
+  if (guard_exhausted)
+  {
+    low_density_no_viewpoint_cycles_++;
+  }
+  else
+  {
+    low_density_no_viewpoint_cycles_ = 0;
+  }
+  const bool guard_done = low_density_no_viewpoint_cycles_ >= pp_.kLowDensityFinishHysteresisCycles;
+
   const bool has_gain = low_density_uncovered_num_ > 0;
   if (has_gain && !low_density_prev_has_gain_)
   {
@@ -775,18 +805,18 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
                        low_density_no_service_cycles_ >= pp_.kLowDensityNoServiceCycleThr;
   const bool base_available = !exploration_finished_ && !low_density_extension_expired_;
 
-  // Stall only suspends the gain channel. It must NOT release the finish
-  // latch while the publisher is still sending fresh points: with a strict
-  // visibility model many points are geometrically invisible, which used to
-  // trip no_gain and end the run although raw was still ~55. The 600 s
-  // extension timeout remains the hard stop.
-  const bool active = base_available && !stalled && external_work;
+  // The guard alone owns the give-up policy (cooling / abandonment). Do NOT
+  // also gate the channel on the cycle-based "stalled" flag: dropped targets
+  // drive no_gain up, which used to switch the whole third channel off and
+  // make recovery impossible. Keep it in the log for diagnosis only.
+  const bool active = base_available && external_work;
   pd_.local_coverage_planner_->SetUseLowDensity(active);
 
-  // Finish latch: many consecutive cycles with no FRESH external work, OR a
-  // sustained lack of real densification progress, are required. The latter
-  // is what retires the permanently unreachable residual points.
-  low_density_work_pending_ = base_available && external_work && !idle_long_enough && !no_progress;
+  // Finish latch: no fresh external work, no robot motion for the configured
+  // window, or the guard having retired every cluster. Plus the 600 s hard
+  // timeout as the ultimate backstop.
+  low_density_work_pending_ = base_available && external_work && !idle_long_enough && !no_progress &&
+                              !guard_done;
 
   // Global-layer cell injection is deliberately DISABLED. Forcing EXPLORING
   // cells made IsReturningHome() flip between consecutive cycles while the
@@ -795,20 +825,24 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   // viewpoint selection and hence the local (executed) path.
   pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
 
-  ROS_INFO_THROTTLE(2.0,
-                    "[LowDensity] state: raw=%d min_raw=%d gain=%d serviced=%d no_gain=%d no_service=%d "
-                    "no_work=%d no_prog=%d pending=%d stalled=%d expired=%d fresh=%d",
-                    diag.raw_point_num, low_density_min_raw_, low_density_uncovered_num_,
-                    low_density_serviced_num_, low_density_no_gain_cycles_, low_density_no_service_cycles_,
-                    low_density_no_work_cycles_, static_cast<int>(no_progress),
-                    static_cast<int>(low_density_work_pending_), static_cast<int>(stalled),
-                    static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
+  ROS_INFO_THROTTLE(
+      2.0,
+      "[LowDensity] state: raw=%d gain=%d serviced=%d dropped=%d | cells=%d active=%d cooling=%d abandoned=%d "
+      "| no_gain=%d no_service=%d no_work=%d guard_idle=%d | idle=%.0fs no_prog=%d guard_done=%d "
+      "pending=%d stalled=%d expired=%d fresh=%d",
+      diag.raw_point_num, low_density_uncovered_num_, low_density_serviced_num_,
+      pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.active_cell_num, diag.cooling_cell_num,
+      diag.abandoned_cell_num, low_density_no_gain_cycles_, low_density_no_service_cycles_,
+      low_density_no_work_cycles_, low_density_no_viewpoint_cycles_, now_sec - low_density_last_progress_sec_,
+      static_cast<int>(no_progress), static_cast<int>(guard_done), static_cast<int>(low_density_work_pending_),
+      static_cast<int>(stalled), static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
 }
 
 void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
 {
-  if (!pp_.kUseLowDensityPoint)
+  if (!pp_.kUseLowDensityPoint || exploration_finished_)
   {
+    low_density_serviced_num_ = 0;
     return;
   }
   const std::vector<int>& serviced_indices = pd_.local_coverage_planner_->GetServicedLowDensityPointIndices();
@@ -816,21 +850,37 @@ void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
   // Stage 4: points the final TSP viewpoints actually cover.
   pd_.planning_env_->PublishServicedLowDensityCloud(serviced_indices);
   ROS_INFO_THROTTLE(2.0, "[LowDensity] serviced this cycle = %d", static_cast<int>(serviced_indices.size()));
-  if (serviced_indices.empty())
-  {
-    return;
-  }
+
+  // A surviving cluster counts as one failed attempt. Order matters: mark
+  // serviced clusters first, then charge the ones that produced no viewpoint
+  // at all, skipping anything already marked so a mixed cluster is not
+  // charged twice in the same cycle.
   const std::vector<uint64_t>& cluster_keys = pd_.planning_env_->GetLowDensityTargetClusterKeys();
-  std::vector<uint64_t> keys;
-  keys.reserve(serviced_indices.size());
+  std::vector<uint64_t> serviced_keys;
+  serviced_keys.reserve(serviced_indices.size());
   for (int idx : serviced_indices)
   {
     if (idx >= 0 && idx < static_cast<int>(cluster_keys.size()))
     {
-      keys.push_back(cluster_keys[idx]);
+      serviced_keys.push_back(cluster_keys[idx]);
     }
   }
-  low_density_guard_.NoteServiced(keys);
+  if (!serviced_keys.empty())
+  {
+    low_density_guard_.NoteServiced(serviced_keys);
+  }
+
+  // Dropped targets used to be silently ignored because NoteServiced was
+  // only called when serviced_indices was non-empty. Once the local viewpoint
+  // window stopped reaching any target, the guard's failure counter froze at
+  // zero forever (this run: cooling=0 abandoned=0 through the whole tail),
+  // so unreachable clusters were released again every single cycle.
+  const std::vector<uint64_t>& unreachable_keys =
+      pd_.planning_env_->GetLowDensityUnreachableClusterKeys();
+  if (!unreachable_keys.empty())
+  {
+    low_density_guard_.NoteUnreachable(unreachable_keys);
+  }
 }
 
 void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& uncovered_frontier_point_num,
@@ -855,10 +905,14 @@ void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& 
   {
     const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
     ROS_INFO_THROTTLE(
-        2.0, "[LowDensity] raw=%d targets=%d uncovered=%d dropped=%d | cells=%d scattered=%d cooling=%d abandoned=%d",
+        2.0,
+        "[LowDensity] raw=%d targets=%d uncovered=%d dropped=%d (z=%d xy=%d) | cells=%d scattered=%d "
+        "cooling=%d abandoned=%d | cand_vp=%d",
         diag.raw_point_num, static_cast<int>(low_density_targets_.size()), uncovered_low_density_point_num,
-        pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.scattered_cell_num, diag.cooling_cell_num,
-        diag.abandoned_cell_num);
+        pd_.planning_env_->GetLowDensityProxyNum(), pd_.planning_env_->GetLowDensityDropZNum(),
+        pd_.planning_env_->GetLowDensityDropXYNum(), diag.cell_num, diag.scattered_cell_num,
+        diag.cooling_cell_num, diag.abandoned_cell_num,
+        static_cast<int>(pd_.viewpoint_manager_->GetViewPointCandidateIndices().size()));
   }
 }
 

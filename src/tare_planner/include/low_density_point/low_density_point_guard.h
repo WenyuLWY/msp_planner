@@ -151,11 +151,11 @@ struct LowDensityGuardDiagnostics
 class LowDensityPointGuard
 {
 public:
-  LowDensityPointGuard() : parameters_(), last_diagnostics_()
+  LowDensityPointGuard() : parameters_(), last_diagnostics_(), last_update_sec_(0.0)
   {
   }
   explicit LowDensityPointGuard(const LowDensityGuardParameters& parameters)
-    : parameters_(parameters), last_diagnostics_()
+    : parameters_(parameters), last_diagnostics_(), last_update_sec_(0.0)
   {
   }
 
@@ -192,13 +192,19 @@ public:
    * @brief Called once per planning cycle with the freshly published cloud.
    * @param raw_points Low-density points published this cycle (may be empty).
    * @param now_sec Monotonic time in seconds, e.g. ros::Time::now().toSec().
+   * @param robot_position Current robot position, used to rank clusters by
+   *        reachability. msp publishes a GLOBAL map; without this the guard
+   *        happily spends its whole 8-cluster budget on far-away regions that
+   *        TARE's rolling local viewpoint window can never reach.
    * @param targets Output: points allowed to contribute gain this cycle.
    */
-  void Update(const std::vector<Point3D>& raw_points, double now_sec, std::vector<LowDensityTarget>& targets)
+  void Update(const std::vector<Point3D>& raw_points, double now_sec, const Point3D& robot_position,
+              std::vector<LowDensityTarget>& targets)
   {
     targets.clear();
     LowDensityGuardDiagnostics diag;
     diag.raw_point_num = static_cast<int>(raw_points.size());
+    last_update_sec_ = now_sec;
 
     std::vector<Point3D> dedup_points;
     Deduplicate(raw_points, dedup_points);
@@ -287,11 +293,27 @@ public:
         ordered_keys.push_back(it->first);
       }
     }
+    // Rank by reachability FIRST. The external publisher hands us a global
+    // cloud while the planner only has a rolling local viewpoint window, so
+    // selecting by support alone spends the entire cluster budget on distant
+    // regions: each cycle those targets are dropped, gain stays 0 and the
+    // local path collapses to zero length (in-place oscillation).
+    const double anchor = parameters_.anchor_cell_size > 0.0 ? parameters_.anchor_cell_size : 1.0;
     std::sort(ordered_keys.begin(), ordered_keys.end(),
-              [&buckets](uint64_t a, uint64_t b)
+              [&buckets, &robot_position, anchor](uint64_t a, uint64_t b)
               {
                 const CellBucket& lhs = buckets.find(a)->second;
                 const CellBucket& rhs = buckets.find(b)->second;
+                const double ldx = (lhs.ix + 0.5) * anchor - robot_position.x;
+                const double ldy = (lhs.iy + 0.5) * anchor - robot_position.y;
+                const double rdx = (rhs.ix + 0.5) * anchor - robot_position.x;
+                const double rdy = (rhs.iy + 0.5) * anchor - robot_position.y;
+                const double ldist2 = ldx * ldx + ldy * ldy;
+                const double rdist2 = rdx * rdx + rdy * rdy;
+                if (ldist2 != rdist2)
+                {
+                  return ldist2 < rdist2;
+                }
                 if (lhs.weight != rhs.weight)
                 {
                   return lhs.weight > rhs.weight;
@@ -342,6 +364,43 @@ public:
       if (it != cell_states_.end() && !it->second.abandoned)
       {
         it->second.serviced_last_cycle = true;
+      }
+    }
+  }
+
+  /**
+   * @brief Count clusters that were released by the guard but produced no
+   * viewpoint at all (no candidate viewpoint within the effective range).
+   * Without this, unreachable clusters never accrue a failure: they are
+   * released every cycle, dropped every cycle, and can never be cooled down
+   * or abandoned -- the give-up policy deadlocks and the robot keeps
+   * re-trying the same handful of points forever.
+   */
+  void NoteUnreachable(const std::vector<uint64_t>& cluster_keys)
+  {
+    // One cluster can contribute many dropped points. Charge it only ONCE per
+    // cycle, otherwise a handful of frames burns through all max_failures.
+    std::unordered_set<uint64_t> charged;
+    charged.reserve(cluster_keys.size());
+    for (std::size_t i = 0; i < cluster_keys.size(); i++)
+    {
+      if (!charged.insert(cluster_keys[i]).second)
+      {
+        continue;
+      }
+      std::unordered_map<uint64_t, CellState>::iterator it = cell_states_.find(cluster_keys[i]);
+      if (it != cell_states_.end() && !it->second.abandoned && !it->second.serviced_last_cycle &&
+          last_update_sec_ >= it->second.cooldown_until)
+      {
+        it->second.failures++;
+        const double exponent = static_cast<double>(std::max(0, it->second.failures - 1));
+        const double cooldown =
+            std::min(parameters_.cooldown_base_sec * std::pow(2.0, exponent), parameters_.cooldown_max_sec);
+        it->second.cooldown_until = last_update_sec_ + cooldown;
+        if (it->second.failures >= parameters_.max_failures)
+        {
+          it->second.abandoned = true;
+        }
       }
     }
   }
@@ -467,5 +526,6 @@ private:
   LowDensityGuardParameters parameters_;
   LowDensityGuardDiagnostics last_diagnostics_;
   std::unordered_map<uint64_t, CellState> cell_states_;
+  double last_update_sec_;
 };
 }  // namespace low_density_point_ns

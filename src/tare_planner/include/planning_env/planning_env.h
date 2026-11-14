@@ -320,6 +320,22 @@ public:
   {
     return low_density_proxy_num_;
   }
+  // Clusters whose targets were released by the guard but reached no
+  // candidate viewpoint. Fed back to the guard as failed attempts.
+  const std::vector<uint64_t>& GetLowDensityUnreachableClusterKeys() const
+  {
+    return low_density_unreachable_cluster_keys_;
+  }
+  // Why targets were dropped: no viewpoint within XY range / all viewpoints
+  // too far in Z / no gain at all. Purely for text-based diagnosis.
+  int GetLowDensityDropZNum() const
+  {
+    return low_density_drop_z_num_;
+  }
+  int GetLowDensityDropXYNum() const
+  {
+    return low_density_drop_xy_num_;
+  }
 
   Eigen::Vector3d GetPointCloudManagerNeighborCellsOrigin()
   {
@@ -381,6 +397,9 @@ private:
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> serviced_low_density_cloud_;
   std::vector<uint64_t> low_density_target_cluster_keys_;
   int low_density_proxy_num_;
+  std::vector<uint64_t> low_density_unreachable_cluster_keys_;
+  int low_density_drop_z_num_;
+  int low_density_drop_xy_num_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> filtered_frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> occupied_cloud_;

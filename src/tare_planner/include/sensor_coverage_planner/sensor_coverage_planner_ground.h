@@ -124,12 +124,15 @@ struct PlannerParameters
   // against a single cooling-induced empty frame.
   int kLowDensityFinishHysteresisCycles;
   double kLowDensityStaleMsgSec;
-  // Allow the run to finish once the global low-density count has stopped
-  // reaching new lows for this long. msp keeps a GLOBAL accumulated map, so
-  // a few dozen unreachable points remain forever; "publisher still sending"
-  // alone is not a valid completion signal.
+  // Allow the run to finish once the planner has produced NO usable
+  // low-density viewpoint for this long. This is a real-progress signal:
+  // msp's density map is GLOBAL and NON-MONOTONIC (new scans ADD isolated
+  // voxels while re-scanning removes them), so tracking a running minimum
+  // of raw_point_num is invalid -- a single early dip can latch forever.
   double kLowDensityNoProgressSec;
-  int kLowDensityProgressDelta;
+  // Robot must move at least this far (or actually service a target) to
+  // refresh the progress clock; small in-place jitter does not count.
+  double kLowDensityProgressDistance;
 
   bool ReadParameters(ros::NodeHandle& nh);
 };
@@ -241,8 +244,10 @@ private:
   bool low_density_prev_has_gain_;
   int low_density_no_work_cycles_;
   double low_density_last_msg_sec_;
-  int low_density_min_raw_;
   double low_density_last_progress_sec_;
+  geometry_msgs::Point low_density_last_progress_pos_;
+  bool low_density_progress_pos_valid_;
+  int low_density_no_viewpoint_cycles_;
 
   ros::Time start_time_;
   ros::Time global_direction_switch_time_;

@@ -56,10 +56,12 @@ void PlanningEnvParameters::ReadParameters(ros::NodeHandle& nh)
 
 PlanningEnv::PlanningEnv(ros::NodeHandle nh, ros::NodeHandle nh_private, std::string world_frame_id)
   : keypose_cloud_count_(0)
+  , robot_position_update_(false)
   , vertical_surface_extractor_()
   , vertical_frontier_extractor_()
-  , robot_position_update_(false)
   , low_density_proxy_num_(0)
+  , low_density_drop_z_num_(0)
+  , low_density_drop_xy_num_(0)
 {
   parameters_.ReadParameters(nh_private);
   keypose_cloud_stack_.resize(parameters_.kKeyposeCloudStackNum);
@@ -382,6 +384,9 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
   uncovered_frontier_point_num = 0;
   uncovered_low_density_point_num = 0;
   low_density_proxy_num_ = 0;
+  low_density_unreachable_cluster_keys_.clear();
+  low_density_drop_z_num_ = 0;
+  low_density_drop_xy_num_ = 0;
   for (int i = 0; i < planner_cloud_->cloud_->points.size(); i++)
   {
     PlannerCloudPointType point = planner_cloud_->cloud_->points[i];
@@ -461,6 +466,8 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
     // viewpoint grid rejects points at other heights. Use a continuous,
     // distance-weighted observation gain instead.
     bool observed = false;
+    bool any_z_ok = false;
+    int z_rejected_num = 0;
     for (const auto& viewpoint_ind : viewpoint_manager->candidate_indices_)
     {
       geometry_msgs::Point vp_position = viewpoint_manager->GetViewPointPosition(viewpoint_ind);
@@ -469,8 +476,10 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
       const double dz = std::abs(target.position.z - vp_position.z);
       if (dz > parameters_.kLowDensityMaxZDiff)
       {
+        z_rejected_num++;
         continue;
       }
+      any_z_ok = true;
       const double xy_dist = std::sqrt(dx * dx + dy * dy);
       if (xy_dist > parameters_.kLowDensityEffectiveRange)
       {
@@ -486,8 +495,18 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
     }
     if (!observed)
     {
-      // No viewpoint close enough this cycle; report it for diagnostics.
+      // No viewpoint close enough this cycle. Record the stable cluster id so
+      // the guard can cool down / abandon regions that are never reachable.
       low_density_proxy_num_++;
+      if (any_z_ok)
+      {
+        low_density_drop_xy_num_++;
+      }
+      else if (z_rejected_num > 0)
+      {
+        low_density_drop_z_num_++;
+      }
+      low_density_unreachable_cluster_keys_.push_back(target.cluster_key);
       continue;
     }
     if (observed)
