@@ -124,6 +124,12 @@ struct PlannerParameters
   // against a single cooling-induced empty frame.
   int kLowDensityFinishHysteresisCycles;
   double kLowDensityStaleMsgSec;
+  // Allow the run to finish once the global low-density count has stopped
+  // reaching new lows for this long. msp keeps a GLOBAL accumulated map, so
+  // a few dozen unreachable points remain forever; "publisher still sending"
+  // alone is not a valid completion signal.
+  double kLowDensityNoProgressSec;
+  int kLowDensityProgressDelta;
 
   bool ReadParameters(ros::NodeHandle& nh);
 };
@@ -235,6 +241,8 @@ private:
   bool low_density_prev_has_gain_;
   int low_density_no_work_cycles_;
   double low_density_last_msg_sec_;
+  int low_density_min_raw_;
+  double low_density_last_progress_sec_;
 
   ros::Time start_time_;
   ros::Time global_direction_switch_time_;

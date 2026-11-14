@@ -13,6 +13,7 @@
 #include "graph/graph.h"
 
 #include <cfloat>
+#include <limits>
 
 namespace sensor_coverage_planner_3d_ns
 {
@@ -61,6 +62,8 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kLowDensityFinishHysteresisCycles =
       misc_utils_ns::getParam<int>(nh, "kLowDensityFinishHysteresisCycles", 10);
   kLowDensityStaleMsgSec = misc_utils_ns::getParam<double>(nh, "kLowDensityStaleMsgSec", 5.0);
+  kLowDensityNoProgressSec = misc_utils_ns::getParam<double>(nh, "kLowDensityNoProgressSec", 60.0);
+  kLowDensityProgressDelta = misc_utils_ns::getParam<int>(nh, "kLowDensityProgressDelta", 2);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -199,6 +202,8 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , low_density_prev_has_gain_(false)
   , low_density_no_work_cycles_(0)
   , low_density_last_msg_sec_(-1.0)
+  , low_density_min_raw_(std::numeric_limits<int>::max())
+  , low_density_last_progress_sec_(-1.0)
 {
   initialize(nh, nh_p);
   PrintExplorationStatus("Exploration Started", false);
@@ -721,6 +726,23 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   }
   const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
 
+  // Real progress = the publisher's GLOBAL low-density count reaching a new
+  // low. msp accumulates a global map, so a few dozen unreachable points
+  // (wall backs, ceilings, grazing edges) remain forever. "Publisher still
+  // sending points" alone therefore cannot be the completion signal: it made
+  // pending stay true forever while the robot sat still with l=0.
+  if (diag.raw_point_num < low_density_min_raw_ - pp_.kLowDensityProgressDelta)
+  {
+    low_density_min_raw_ = diag.raw_point_num;
+    low_density_last_progress_sec_ = now_sec;
+  }
+  else if (low_density_last_progress_sec_ < 0.0)
+  {
+    low_density_last_progress_sec_ = now_sec;
+  }
+  const bool no_progress = low_density_last_progress_sec_ >= 0.0 &&
+                           (now_sec - low_density_last_progress_sec_) > pp_.kLowDensityNoProgressSec;
+
   // The external publisher is the authority on whether work remains. Guard
   // cooling deliberately blanks targets for a few cycles; using targets (or
   // even gain) as the finish signal lets ONE such frame latch the
@@ -761,9 +783,10 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   const bool active = base_available && !stalled && external_work;
   pd_.local_coverage_planner_->SetUseLowDensity(active);
 
-  // Sticky finish latch: many consecutive cycles with no FRESH external work
-  // are required before exploration may complete.
-  low_density_work_pending_ = base_available && external_work && !idle_long_enough;
+  // Finish latch: many consecutive cycles with no FRESH external work, OR a
+  // sustained lack of real densification progress, are required. The latter
+  // is what retires the permanently unreachable residual points.
+  low_density_work_pending_ = base_available && external_work && !idle_long_enough && !no_progress;
 
   // Global-layer cell injection is deliberately DISABLED. Forcing EXPLORING
   // cells made IsReturningHome() flip between consecutive cycles while the
@@ -773,10 +796,11 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
 
   ROS_INFO_THROTTLE(2.0,
-                    "[LowDensity] state: raw=%d gain=%d serviced=%d no_gain=%d no_service=%d no_work=%d "
-                    "pending=%d stalled=%d expired=%d fresh=%d",
-                    diag.raw_point_num, low_density_uncovered_num_, low_density_serviced_num_,
-                    low_density_no_gain_cycles_, low_density_no_service_cycles_, low_density_no_work_cycles_,
+                    "[LowDensity] state: raw=%d min_raw=%d gain=%d serviced=%d no_gain=%d no_service=%d "
+                    "no_work=%d no_prog=%d pending=%d stalled=%d expired=%d fresh=%d",
+                    diag.raw_point_num, low_density_min_raw_, low_density_uncovered_num_,
+                    low_density_serviced_num_, low_density_no_gain_cycles_, low_density_no_service_cycles_,
+                    low_density_no_work_cycles_, static_cast<int>(no_progress),
                     static_cast<int>(low_density_work_pending_), static_cast<int>(stalled),
                     static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
 }
