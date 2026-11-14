@@ -167,6 +167,16 @@ public:
   {
     cell_states_.clear();
   }
+  // Give up on every currently tracked region. Used when the planner detects
+  // that none of these points can be turned into an actual detour. Regions
+  // that disappear and later reappear are treated as fresh work.
+  void AbandonAll()
+  {
+    for (auto& entry : cell_states_)
+    {
+      entry.second.abandoned = true;
+    }
+  }
   const LowDensityGuardDiagnostics& GetDiagnostics() const
   {
     return last_diagnostics_;

@@ -306,6 +306,11 @@ public:
   {
     return low_density_target_cluster_keys_;
   }
+  // Points that actually entered the gain computation this cycle.
+  const pcl::PointCloud<pcl::PointXYZI>::Ptr& GetUncoveredLowDensityCloud() const
+  {
+    return uncovered_low_density_cloud_->cloud_;
+  }
 
   Eigen::Vector3d GetPointCloudManagerNeighborCellsOrigin()
   {

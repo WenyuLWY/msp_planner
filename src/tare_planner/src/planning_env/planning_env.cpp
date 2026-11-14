@@ -449,16 +449,17 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
     {
       continue;
     }
+    // Unlike surface/frontier points, a low-density region may need to be
+    // re-scanned from a viewpoint the robot has already visited. The external
+    // publisher decides when the point is resolved, so do not filter on
+    // ViewPointVisited here.
     bool observed = false;
     for (const auto& viewpoint_ind : viewpoint_manager->candidate_indices_)
     {
-      if (!viewpoint_manager->ViewPointVisited(viewpoint_ind))
+      if (viewpoint_manager->VisibleByViewPoint<low_density_point_ns::Point3D>(target.position, viewpoint_ind))
       {
-        if (viewpoint_manager->VisibleByViewPoint<low_density_point_ns::Point3D>(target.position, viewpoint_ind))
-        {
-          viewpoint_manager->AddUncoveredLowDensityPoint(viewpoint_ind, uncovered_low_density_point_num);
-          observed = true;
-        }
+        viewpoint_manager->AddUncoveredLowDensityPoint(viewpoint_ind, uncovered_low_density_point_num);
+        observed = true;
       }
     }
     if (observed)

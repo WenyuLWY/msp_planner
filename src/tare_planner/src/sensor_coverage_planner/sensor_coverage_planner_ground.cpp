@@ -54,6 +54,8 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kUseMomentum = misc_utils_ns::getParam<bool>(nh, "kUseMomentum", false);
   kUseLowDensityPoint = misc_utils_ns::getParam<bool>(nh, "kUseLowDensityPoint", false);
   kLowDensityMaxExtensionSec = misc_utils_ns::getParam<double>(nh, "kLowDensityMaxExtensionSec", 600.0);
+  kLowDensityNoGainCycleThr = misc_utils_ns::getParam<int>(nh, "kLowDensityNoGainCycleThr", 3);
+  kLowDensityNoServiceCycleThr = misc_utils_ns::getParam<int>(nh, "kLowDensityNoServiceCycleThr", 8);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -185,6 +187,11 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , low_density_work_pending_(false)
   , low_density_extension_expired_(false)
   , low_density_extension_start_sec_(-1.0)
+  , low_density_uncovered_num_(0)
+  , low_density_serviced_num_(0)
+  , low_density_no_gain_cycles_(0)
+  , low_density_no_service_cycles_(0)
+  , low_density_prev_has_gain_(false)
 {
   initialize(nh, nh_p);
   PrintExplorationStatus("Exploration Started", false);
@@ -610,11 +617,8 @@ void SensorCoveragePlanner3D::UpdateRobotViewPointCoverage()
 void SensorCoveragePlanner3D::UpdateLowDensityTargets()
 {
   low_density_targets_.clear();
-  low_density_work_pending_ = false;
   if (!pp_.kUseLowDensityPoint)
   {
-    pd_.local_coverage_planner_->SetUseLowDensity(false);
-    pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
     return;
   }
 
@@ -660,6 +664,10 @@ void SensorCoveragePlanner3D::UpdateLowDensityTargets()
       (now_sec - low_density_extension_start_sec_) > pp_.kLowDensityMaxExtensionSec;
   if (extension_timed_out)
   {
+    if (!low_density_extension_expired_)
+    {
+      low_density_guard_.AbandonAll();
+    }
     low_density_extension_expired_ = true;
   }
 
@@ -667,7 +675,6 @@ void SensorCoveragePlanner3D::UpdateLowDensityTargets()
   {
     low_density_targets_.clear();
   }
-  low_density_work_pending_ = !low_density_targets_.empty();
 
   // Stage 2: targets surviving the give-up policy (weight in intensity).
   pcl::PointCloud<pcl::PointXYZI>::Ptr vis_cloud(new pcl::PointCloud<pcl::PointXYZI>());
@@ -686,16 +693,55 @@ void SensorCoveragePlanner3D::UpdateLowDensityTargets()
   vis_msg.header.stamp = ros::Time::now();
   low_density_target_pub_.publish(vis_msg);
 
-  pd_.local_coverage_planner_->SetUseLowDensity(low_density_work_pending_);
+}
 
-  // Keep the corresponding global cells on the exploration agenda.
-  std::vector<Eigen::Vector3d> cell_positions;
-  cell_positions.reserve(low_density_targets_.size());
-  for (const auto& target : low_density_targets_)
+void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
+{
+  if (!pp_.kUseLowDensityPoint)
   {
-    cell_positions.emplace_back(target.position.x, target.position.y, target.position.z);
+    low_density_work_pending_ = false;
+    pd_.local_coverage_planner_->SetUseLowDensity(false);
+    pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
+    return;
+  }
+
+  // Only points that actually entered the gain computation count as work.
+  // Binding this to the raw guard output was the cause of the in-place
+  // oscillation: invisible targets kept EXPLORING cells injected forever.
+  const bool has_gain = low_density_uncovered_num_ > 0;
+  if (has_gain && !low_density_prev_has_gain_)
+  {
+    low_density_no_gain_cycles_ = 0;
+    low_density_no_service_cycles_ = 0;
+  }
+  low_density_prev_has_gain_ = has_gain;
+  low_density_no_gain_cycles_ = has_gain ? 0 : low_density_no_gain_cycles_ + 1;
+  low_density_no_service_cycles_ =
+      (has_gain && low_density_serviced_num_ > 0) ? 0 : low_density_no_service_cycles_ + 1;
+
+  const bool stalled = low_density_no_gain_cycles_ >= pp_.kLowDensityNoGainCycleThr ||
+                       low_density_no_service_cycles_ >= pp_.kLowDensityNoServiceCycleThr;
+  const bool active = !exploration_finished_ && !low_density_extension_expired_ && !stalled && has_gain;
+  low_density_work_pending_ = active;
+  pd_.local_coverage_planner_->SetUseLowDensity(active);
+
+  std::vector<Eigen::Vector3d> cell_positions;
+  if (active)
+  {
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud = pd_.planning_env_->GetUncoveredLowDensityCloud();
+    cell_positions.reserve(cloud->points.size());
+    for (const auto& point : cloud->points)
+    {
+      cell_positions.emplace_back(point.x, point.y, point.z);
+    }
   }
   pd_.grid_world_->SetLowDensityCellPositions(cell_positions);
+
+  ROS_INFO_THROTTLE(2.0,
+                    "[LowDensity] state: gain=%d serviced=%d no_gain=%d no_service=%d pending=%d stalled=%d expired=%d",
+                    low_density_uncovered_num_, low_density_serviced_num_, low_density_no_gain_cycles_,
+                    low_density_no_service_cycles_, static_cast<int>(active), static_cast<int>(stalled),
+                    static_cast<int>(low_density_extension_expired_));
 }
 
 void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
@@ -705,6 +751,7 @@ void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
     return;
   }
   const std::vector<int>& serviced_indices = pd_.local_coverage_planner_->GetServicedLowDensityPointIndices();
+  low_density_serviced_num_ = static_cast<int>(serviced_indices.size());
   // Stage 4: points the final TSP viewpoints actually cover.
   pd_.planning_env_->PublishServicedLowDensityCloud(serviced_indices);
   ROS_INFO_THROTTLE(2.0, "[LowDensity] serviced this cycle = %d", static_cast<int>(serviced_indices.size()));
@@ -741,6 +788,7 @@ void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& 
   pd_.planning_env_->PublishUncoveredCloud();
   pd_.planning_env_->PublishUncoveredFrontierCloud();
   pd_.planning_env_->PublishUncoveredLowDensityCloud();
+  low_density_uncovered_num_ = uncovered_low_density_point_num;
 
   if (pp_.kUseLowDensityPoint)
   {
@@ -1519,8 +1567,10 @@ void SensorCoveragePlanner3D::execute(const ros::TimerEvent&)
     }
     else
     {
+      low_density_uncovered_num_ = 0;
       pd_.viewpoint_manager_->ResetViewPointCoverage();
     }
+    UpdateLowDensityPlanningState();
 
     update_representation_timer.Stop(false);
     update_representation_runtime_ += update_representation_timer.GetDuration("ms");

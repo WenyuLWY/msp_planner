@@ -202,11 +202,22 @@ void LocalCoveragePlanner::EnqueueViewpointCandidates(std::vector<std::pair<int,
         frontier_queue.emplace_back(covered_frontier_point_num, viewpoint_index);
       }
     }
+  }
 
-    // Independent third channel: a viewpoint can be queued for both surface
-    // points and low-density points. Duplicates are removed later.
-    if (use_low_density_)
+  // Independent third channel. This loop deliberately bypasses the
+  // visited / in-exploring-cell filters above: late in exploration almost
+  // every candidate viewpoint is visited, and filtering here would leave the
+  // low-density queue permanently empty.
+  if (use_low_density_)
+  {
+    for (const auto& viewpoint_index : viewpoint_manager_->GetViewPointCandidateIndices())
     {
+      int viewpoint_array_index = viewpoint_manager_->GetViewPointArrayInd(viewpoint_index);
+      if (std::find(selected_viewpoint_array_indices.begin(), selected_viewpoint_array_indices.end(),
+                    viewpoint_array_index) != selected_viewpoint_array_indices.end())
+      {
+        continue;
+      }
       int covered_low_density_point_num = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(
           covered_low_density_point_list, viewpoint_array_index, true);
       if (covered_low_density_point_num >= parameters_.kMinAddLowDensityPointNum)

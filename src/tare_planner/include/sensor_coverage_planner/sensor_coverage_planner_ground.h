@@ -114,6 +114,11 @@ struct PlannerParameters
   int kDirectionChangeCounterThr;
   int kDirectionNoChangeCounterThr;
   int kResetWaypointJoystickAxesID;
+  // Consecutive cycles with no visible low-density targets / no serviced
+  // targets before the channel is declared stalled and stops driving the
+  // global planner. This is what prevents in-place oscillation.
+  int kLowDensityNoGainCycleThr;
+  int kLowDensityNoServiceCycleThr;
 
   bool ReadParameters(ros::NodeHandle& nh);
 };
@@ -218,6 +223,11 @@ private:
   bool low_density_work_pending_;
   bool low_density_extension_expired_;
   double low_density_extension_start_sec_;
+  int low_density_uncovered_num_;
+  int low_density_serviced_num_;
+  int low_density_no_gain_cycles_;
+  int low_density_no_service_cycles_;
+  bool low_density_prev_has_gain_;
 
   ros::Time start_time_;
   ros::Time global_direction_switch_time_;
@@ -275,6 +285,7 @@ private:
   void UpdateCoveredAreas(int& uncovered_point_num, int& uncovered_frontier_point_num,
                           int& uncovered_low_density_point_num);
   void UpdateLowDensityTargets();
+  void UpdateLowDensityPlanningState();
   void FeedbackLowDensityServiced();
   void UpdateVisitedPositions();
   void UpdateGlobalRepresentation();
