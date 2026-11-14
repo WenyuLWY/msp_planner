@@ -104,6 +104,9 @@ struct PlannerParameters
   double kAtHomeDistThreshold;
   double kTerrainCollisionThreshold;
   double kLookAheadDistance;
+  // Hard cap (seconds) on how long pending low-density points may delay
+  // the return-home transition. Prevents everlasting exploration.
+  double kLowDensityMaxExtensionSec;
   double kExtendWayPointDistanceBig;
   double kExtendWayPointDistanceSmall;
 
@@ -212,6 +215,9 @@ private:
   int momentum_activation_count_;
 
   double reset_waypoint_joystick_axis_value_;
+  bool low_density_work_pending_;
+  bool low_density_extension_expired_;
+  double low_density_extension_start_sec_;
 
   ros::Time start_time_;
   ros::Time global_direction_switch_time_;
@@ -246,6 +252,7 @@ private:
   // Debug
   ros::Publisher pointcloud_manager_neighbor_cells_origin_pub_;
   ros::Publisher low_density_target_pub_;
+  ros::Publisher low_density_raw_pub_;
 
   // Callback functions
   void ExplorationStartCallback(const std_msgs::Bool::ConstPtr& start_msg);

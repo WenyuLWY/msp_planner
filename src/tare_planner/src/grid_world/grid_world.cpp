@@ -689,6 +689,11 @@ void GridWorld::UpdateCellStatus(const std::shared_ptr<viewpoint_manager_ns::Vie
   }
 }
 
+void GridWorld::SetLowDensityCellPositions(const std::vector<Eigen::Vector3d>& positions)
+{
+  low_density_cell_positions_ = positions;
+}
+
 exploration_path_ns::ExplorationPath GridWorld::SolveGlobalTSP(
     const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager,
     std::vector<int>& ordered_cell_indices, const std::unique_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph)
@@ -735,6 +740,22 @@ exploration_path_ns::ExplorationPath GridWorld::SolveGlobalTSP(
   }
 
   /****** Get all the connected exploring cells *****/
+  // Keep low-density cells on the global agenda. Without this, GridWorld sees
+  // no EXPLORING cell and immediately produces a return-home path.
+  for (const auto& position : low_density_cell_positions_)
+  {
+    Eigen::Vector3i sub = subspaces_->Pos2Sub(position);
+    if (!subspaces_->InRange(sub))
+    {
+      continue;
+    }
+    int cell_ind = subspaces_->Sub2Ind(sub);
+    if (subspaces_->GetCell(cell_ind).GetStatus() != CellStatus::NOGO)
+    {
+      subspaces_->GetCell(cell_ind).SetStatus(CellStatus::EXPLORING);
+    }
+  }
+
   exploration_path_ns::ExplorationPath global_path;
   std::vector<geometry_msgs::Point> exploring_cell_positions;
   std::vector<int> exploring_cell_indices;

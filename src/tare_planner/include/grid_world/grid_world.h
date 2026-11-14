@@ -315,6 +315,11 @@ public:
   void Reset();
   int GetCellStatusCount(grid_world_ns::CellStatus status);
   void UpdateCellStatus(const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager);
+  // Cells that still contain active externally published low-density targets.
+  // They are forced to EXPLORING during global TSP so the robot does not
+  // return home while those points are pending. Empty by default -> no change
+  // to the original behaviour.
+  void SetLowDensityCellPositions(const std::vector<Eigen::Vector3d>& positions);
   exploration_path_ns::ExplorationPath
   SolveGlobalTSP(const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager,
                  std::vector<int>& ordered_cell_indices,
@@ -383,6 +388,7 @@ private:
   geometry_msgs::Point origin_;
   std::vector<int> neighbor_cell_indices_;
   std::vector<int> almost_covered_cell_indices_;
+  std::vector<Eigen::Vector3d> low_density_cell_positions_;
   std::vector<std::pair<int, int>> to_connect_cell_indices_;
   std::vector<nav_msgs::Path> to_connect_cell_paths_;
   Eigen::Vector3d home_position_;

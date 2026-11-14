@@ -53,6 +53,7 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kNoExplorationReturnHome = misc_utils_ns::getParam<bool>(nh, "kNoExplorationReturnHome", true);
   kUseMomentum = misc_utils_ns::getParam<bool>(nh, "kUseMomentum", false);
   kUseLowDensityPoint = misc_utils_ns::getParam<bool>(nh, "kUseLowDensityPoint", false);
+  kLowDensityMaxExtensionSec = misc_utils_ns::getParam<double>(nh, "kLowDensityMaxExtensionSec", 600.0);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -181,6 +182,9 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , direction_no_change_count_(0)
   , momentum_activation_count_(0)
   , reset_waypoint_joystick_axis_value_(-1.0)
+  , low_density_work_pending_(false)
+  , low_density_extension_expired_(false)
+  , low_density_extension_start_sec_(-1.0)
 {
   initialize(nh, nh_p);
   PrintExplorationStatus("Exploration Started", false);
@@ -261,6 +265,7 @@ bool SensorCoveragePlanner3D::initialize(ros::NodeHandle& nh, ros::NodeHandle& n
   pointcloud_manager_neighbor_cells_origin_pub_ =
       nh.advertise<geometry_msgs::PointStamped>("pointcloud_manager_neighbor_cells_origin", 1);
   low_density_target_pub_ = nh.advertise<sensor_msgs::PointCloud2>("low_density_targets", 1);
+  low_density_raw_pub_ = nh.advertise<sensor_msgs::PointCloud2>("low_density_raw", 1);
 
   return true;
 }
@@ -605,9 +610,11 @@ void SensorCoveragePlanner3D::UpdateRobotViewPointCoverage()
 void SensorCoveragePlanner3D::UpdateLowDensityTargets()
 {
   low_density_targets_.clear();
+  low_density_work_pending_ = false;
   if (!pp_.kUseLowDensityPoint)
   {
     pd_.local_coverage_planner_->SetUseLowDensity(false);
+    pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
     return;
   }
 
@@ -617,17 +624,52 @@ void SensorCoveragePlanner3D::UpdateLowDensityTargets()
     raw_points = low_density_raw_points_;
   }
 
-  // Always advance the guard state machine, even while the channel is
-  // suppressed, so cooling / abandonment keep progressing in wall-clock time.
-  low_density_guard_.Update(raw_points, ros::Time::now().toSec(), low_density_targets_);
+  // Stage 1: raw points as received from the mapping node.
+  pcl::PointCloud<pcl::PointXYZI>::Ptr raw_cloud(new pcl::PointCloud<pcl::PointXYZI>());
+  for (const auto& position : raw_points)
+  {
+    pcl::PointXYZI point;
+    point.x = position.x;
+    point.y = position.y;
+    point.z = position.z;
+    point.intensity = 0.0;
+    raw_cloud->points.push_back(point);
+  }
+  sensor_msgs::PointCloud2 raw_msg;
+  pcl::toROSMsg(*raw_cloud, raw_msg);
+  raw_msg.header.frame_id = kWorldFrameID;
+  raw_msg.header.stamp = ros::Time::now();
+  low_density_raw_pub_.publish(raw_msg);
 
-  // Low-density points must never interfere with returning home.
-  if (exploration_finished_ || pd_.grid_world_->IsReturningHome())
+  const double now_sec = ros::Time::now().toSec();
+
+  // Always advance the guard, even while suppressed, so cooling and
+  // abandonment keep progressing in wall-clock time.
+  low_density_guard_.Update(raw_points, now_sec, low_density_targets_);
+
+  // Hard cap on the post-exploration extension. The clock is monotonic on
+  // purpose: injecting low-density cells turns IsReturningHome() back to
+  // false on the next cycle, so resetting it here would make the timeout
+  // unreachable.
+  if (pd_.grid_world_->IsReturningHome() && low_density_extension_start_sec_ < 0.0)
+  {
+    low_density_extension_start_sec_ = now_sec;
+  }
+  const bool extension_timed_out =
+      low_density_extension_start_sec_ >= 0.0 &&
+      (now_sec - low_density_extension_start_sec_) > pp_.kLowDensityMaxExtensionSec;
+  if (extension_timed_out)
+  {
+    low_density_extension_expired_ = true;
+  }
+
+  if (exploration_finished_ || low_density_extension_expired_)
   {
     low_density_targets_.clear();
   }
-  pd_.local_coverage_planner_->SetUseLowDensity(!low_density_targets_.empty());
+  low_density_work_pending_ = !low_density_targets_.empty();
 
+  // Stage 2: targets surviving the give-up policy (weight in intensity).
   pcl::PointCloud<pcl::PointXYZI>::Ptr vis_cloud(new pcl::PointCloud<pcl::PointXYZI>());
   for (const auto& target : low_density_targets_)
   {
@@ -643,6 +685,17 @@ void SensorCoveragePlanner3D::UpdateLowDensityTargets()
   vis_msg.header.frame_id = kWorldFrameID;
   vis_msg.header.stamp = ros::Time::now();
   low_density_target_pub_.publish(vis_msg);
+
+  pd_.local_coverage_planner_->SetUseLowDensity(low_density_work_pending_);
+
+  // Keep the corresponding global cells on the exploration agenda.
+  std::vector<Eigen::Vector3d> cell_positions;
+  cell_positions.reserve(low_density_targets_.size());
+  for (const auto& target : low_density_targets_)
+  {
+    cell_positions.emplace_back(target.position.x, target.position.y, target.position.z);
+  }
+  pd_.grid_world_->SetLowDensityCellPositions(cell_positions);
 }
 
 void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
@@ -652,6 +705,9 @@ void SensorCoveragePlanner3D::FeedbackLowDensityServiced()
     return;
   }
   const std::vector<int>& serviced_indices = pd_.local_coverage_planner_->GetServicedLowDensityPointIndices();
+  // Stage 4: points the final TSP viewpoints actually cover.
+  pd_.planning_env_->PublishServicedLowDensityCloud(serviced_indices);
+  ROS_INFO_THROTTLE(2.0, "[LowDensity] serviced this cycle = %d", static_cast<int>(serviced_indices.size()));
   if (serviced_indices.empty())
   {
     return;
@@ -685,6 +741,16 @@ void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& 
   pd_.planning_env_->PublishUncoveredCloud();
   pd_.planning_env_->PublishUncoveredFrontierCloud();
   pd_.planning_env_->PublishUncoveredLowDensityCloud();
+
+  if (pp_.kUseLowDensityPoint)
+  {
+    const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
+    ROS_INFO_THROTTLE(2.0,
+                      "[LowDensity] raw=%d targets=%d uncovered=%d | cells=%d scattered=%d cooling=%d abandoned=%d",
+                      diag.raw_point_num, static_cast<int>(low_density_targets_.size()),
+                      uncovered_low_density_point_num, diag.cell_num, diag.scattered_cell_num,
+                      diag.cooling_cell_num, diag.abandoned_cell_num);
+  }
 }
 
 void SensorCoveragePlanner3D::UpdateVisitedPositions()
@@ -1473,8 +1539,10 @@ void SensorCoveragePlanner3D::execute(const ros::TimerEvent&)
     near_home_ = GetRobotToHomeDistance() < pp_.kRushHomeDist;
     at_home_ = GetRobotToHomeDistance() < pp_.kAtHomeDistThreshold;
 
+    // Pending low-density work keeps exploration alive. The guard's give-up
+    // policy and kLowDensityMaxExtensionSec guarantee this is bounded.
     if (pd_.grid_world_->IsReturningHome() && pd_.local_coverage_planner_->IsLocalCoverageComplete() &&
-        (ros::Time::now() - start_time_).toSec() > 5)
+        !low_density_work_pending_ && (ros::Time::now() - start_time_).toSec() > 5)
     {
       if (!exploration_finished_)
       {

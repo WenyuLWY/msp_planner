@@ -316,6 +316,9 @@ public:
   void PublishUncoveredCloud();
   void PublishUncoveredFrontierCloud();
   void PublishUncoveredLowDensityCloud();
+  // Visualizes the low-density points actually covered by the final TSP
+  // viewpoints, i.e. the ones the planner is really trying to re-scan.
+  void PublishServicedLowDensityCloud(const std::vector<int>& serviced_indices);
 
 private:
   PlanningEnvParameters parameters_;
@@ -361,6 +364,7 @@ private:
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_low_density_cloud_;
+  std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> serviced_low_density_cloud_;
   std::vector<uint64_t> low_density_target_cluster_keys_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> filtered_frontier_cloud_;

@@ -110,6 +110,8 @@ PlanningEnv::PlanningEnv(ros::NodeHandle nh, ros::NodeHandle nh_private, std::st
       std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(nh, "uncovered_frontier_cloud", world_frame_id);
   uncovered_low_density_cloud_ = std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
       nh, "uncovered_low_density_cloud", world_frame_id);
+  serviced_low_density_cloud_ = std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
+      nh, "serviced_low_density_cloud", world_frame_id);
   frontier_cloud_ =
       std::make_unique<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(nh, "frontier_cloud", world_frame_id);
   filtered_frontier_cloud_ =
@@ -496,6 +498,23 @@ void PlanningEnv::PublishUncoveredFrontierCloud()
 void PlanningEnv::PublishUncoveredLowDensityCloud()
 {
   uncovered_low_density_cloud_->Publish();
+}
+
+void PlanningEnv::PublishServicedLowDensityCloud(const std::vector<int>& serviced_indices)
+{
+  serviced_low_density_cloud_->cloud_->clear();
+  const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud = uncovered_low_density_cloud_->cloud_;
+  for (int idx : serviced_indices)
+  {
+    if (idx < 0 || idx >= static_cast<int>(cloud->points.size()))
+    {
+      continue;
+    }
+    pcl::PointXYZI point = cloud->points[idx];
+    point.intensity = 1.0;
+    serviced_low_density_cloud_->cloud_->points.push_back(point);
+  }
+  serviced_low_density_cloud_->Publish();
 }
 
 }  // namespace planning_env_ns
