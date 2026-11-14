@@ -58,6 +58,9 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kLowDensityMaxExtensionSec = misc_utils_ns::getParam<double>(nh, "kLowDensityMaxExtensionSec", 600.0);
   kLowDensityNoGainCycleThr = misc_utils_ns::getParam<int>(nh, "kLowDensityNoGainCycleThr", 3);
   kLowDensityNoServiceCycleThr = misc_utils_ns::getParam<int>(nh, "kLowDensityNoServiceCycleThr", 8);
+  kLowDensityFinishHysteresisCycles =
+      misc_utils_ns::getParam<int>(nh, "kLowDensityFinishHysteresisCycles", 10);
+  kLowDensityStaleMsgSec = misc_utils_ns::getParam<double>(nh, "kLowDensityStaleMsgSec", 5.0);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -194,6 +197,8 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , low_density_no_gain_cycles_(0)
   , low_density_no_service_cycles_(0)
   , low_density_prev_has_gain_(false)
+  , low_density_no_work_cycles_(0)
+  , low_density_last_msg_sec_(-1.0)
 {
   initialize(nh, nh_p);
   PrintExplorationStatus("Exploration Started", false);
@@ -511,6 +516,7 @@ void SensorCoveragePlanner3D::PCDDensityMapCallback(const sensor_msgs::PointClou
   {
     std::lock_guard<std::mutex> lock(low_density_mutex_);
     low_density_raw_points_.swap(points);
+    low_density_last_msg_sec_ = ros::Time::now().toSec();
   }
 }
 
@@ -707,9 +713,31 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
     return;
   }
 
-  // Only points that actually entered the gain computation count as work.
-  // Binding this to the raw guard output was the cause of the in-place
-  // oscillation: invisible targets kept EXPLORING cells injected forever.
+  const double now_sec = ros::Time::now().toSec();
+  double last_msg_sec;
+  {
+    std::lock_guard<std::mutex> lock(low_density_mutex_);
+    last_msg_sec = low_density_last_msg_sec_;
+  }
+  const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
+
+  // The external publisher is the authority on whether work remains. Guard
+  // cooling deliberately blanks targets for a few cycles; using targets (or
+  // even gain) as the finish signal lets ONE such frame latch the
+  // irreversible exploration_finished_ flag permanently. That was the cause
+  // of the premature "Exploration completed" while raw was still ~350.
+  const bool fresh = last_msg_sec >= 0.0 && (now_sec - last_msg_sec) < pp_.kLowDensityStaleMsgSec;
+  const bool external_work = fresh && diag.raw_point_num > 0;
+  if (external_work)
+  {
+    low_density_no_work_cycles_ = 0;
+  }
+  else
+  {
+    low_density_no_work_cycles_++;
+  }
+  const bool idle_long_enough = low_density_no_work_cycles_ >= pp_.kLowDensityFinishHysteresisCycles;
+
   const bool has_gain = low_density_uncovered_num_ > 0;
   if (has_gain && !low_density_prev_has_gain_)
   {
@@ -723,9 +751,16 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
 
   const bool stalled = low_density_no_gain_cycles_ >= pp_.kLowDensityNoGainCycleThr ||
                        low_density_no_service_cycles_ >= pp_.kLowDensityNoServiceCycleThr;
-  const bool active = !exploration_finished_ && !low_density_extension_expired_ && !stalled && has_gain;
-  low_density_work_pending_ = active;
+  const bool available = !exploration_finished_ && !low_density_extension_expired_ && !stalled;
+
+  // Keep the channel enabled during guard cooling too (the gain queue simply
+  // stays empty for those cycles) so a cooldown gap cannot switch it off.
+  const bool active = available && external_work;
   pd_.local_coverage_planner_->SetUseLowDensity(active);
+
+  // Sticky finish latch: many consecutive cycles with no FRESH external work
+  // are required before exploration may complete.
+  low_density_work_pending_ = available && external_work && !idle_long_enough;
 
   // Global-layer cell injection is deliberately DISABLED. Forcing EXPLORING
   // cells made IsReturningHome() flip between consecutive cycles while the
@@ -735,10 +770,12 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
 
   ROS_INFO_THROTTLE(2.0,
-                    "[LowDensity] state: gain=%d serviced=%d no_gain=%d no_service=%d pending=%d stalled=%d expired=%d",
-                    low_density_uncovered_num_, low_density_serviced_num_, low_density_no_gain_cycles_,
-                    low_density_no_service_cycles_, static_cast<int>(active), static_cast<int>(stalled),
-                    static_cast<int>(low_density_extension_expired_));
+                    "[LowDensity] state: raw=%d gain=%d serviced=%d no_gain=%d no_service=%d no_work=%d "
+                    "pending=%d stalled=%d expired=%d fresh=%d",
+                    diag.raw_point_num, low_density_uncovered_num_, low_density_serviced_num_,
+                    low_density_no_gain_cycles_, low_density_no_service_cycles_, low_density_no_work_cycles_,
+                    static_cast<int>(low_density_work_pending_), static_cast<int>(stalled),
+                    static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
 }
 
 void SensorCoveragePlanner3D::FeedbackLowDensityServiced()

@@ -119,6 +119,11 @@ struct PlannerParameters
   // global planner. This is what prevents in-place oscillation.
   int kLowDensityNoGainCycleThr;
   int kLowDensityNoServiceCycleThr;
+  // Consecutive cycles with no fresh low-density message before exploration
+  // is allowed to finish. Guards the irreversible exploration_finished_ latch
+  // against a single cooling-induced empty frame.
+  int kLowDensityFinishHysteresisCycles;
+  double kLowDensityStaleMsgSec;
 
   bool ReadParameters(ros::NodeHandle& nh);
 };
@@ -228,6 +233,8 @@ private:
   int low_density_no_gain_cycles_;
   int low_density_no_service_cycles_;
   bool low_density_prev_has_gain_;
+  int low_density_no_work_cycles_;
+  double low_density_last_msg_sec_;
 
   ros::Time start_time_;
   ros::Time global_direction_switch_time_;
