@@ -311,6 +311,10 @@ public:
   {
     return uncovered_low_density_cloud_->cloud_;
   }
+  int GetLowDensityProxyNum() const
+  {
+    return low_density_proxy_num_;
+  }
 
   Eigen::Vector3d GetPointCloudManagerNeighborCellsOrigin()
   {
@@ -371,6 +375,7 @@ private:
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> uncovered_low_density_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> serviced_low_density_cloud_;
   std::vector<uint64_t> low_density_target_cluster_keys_;
+  int low_density_proxy_num_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> filtered_frontier_cloud_;
   std::unique_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> occupied_cloud_;

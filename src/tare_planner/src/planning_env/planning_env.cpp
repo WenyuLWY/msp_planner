@@ -57,6 +57,7 @@ PlanningEnv::PlanningEnv(ros::NodeHandle nh, ros::NodeHandle nh_private, std::st
   , vertical_surface_extractor_()
   , vertical_frontier_extractor_()
   , robot_position_update_(false)
+  , low_density_proxy_num_(0)
 {
   parameters_.ReadParameters(nh_private);
   keypose_cloud_stack_.resize(parameters_.kKeyposeCloudStackNum);
@@ -378,6 +379,7 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
   uncovered_point_num = 0;
   uncovered_frontier_point_num = 0;
   uncovered_low_density_point_num = 0;
+  low_density_proxy_num_ = 0;
   for (int i = 0; i < planner_cloud_->cloud_->points.size(); i++)
   {
     PlannerCloudPointType point = planner_cloud_->cloud_->points[i];
@@ -460,6 +462,22 @@ void PlanningEnv::GetUncoveredArea(const std::shared_ptr<viewpoint_manager_ns::V
       {
         viewpoint_manager->AddUncoveredLowDensityPoint(viewpoint_ind, uncovered_low_density_point_num);
         observed = true;
+      }
+    }
+    // Fallback: a low-density point is a "region to re-scan", not a sensor
+    // surface sample. The strict LiDAR visibility model (single-layer
+    // viewpoint grid, z diff < ~1.5-2.5 m, occlusion check) rejects points
+    // on walls / far away / behind obstacles. Attach those to the nearest
+    // candidate viewpoint so the planner is still driven to the region.
+    if (!observed)
+    {
+      int nearest_viewpoint_ind = viewpoint_manager->GetNearestCandidateViewPointInd(
+          Eigen::Vector3d(target.position.x, target.position.y, target.position.z));
+      if (viewpoint_manager->InRange(nearest_viewpoint_ind))
+      {
+        viewpoint_manager->AddUncoveredLowDensityPoint(nearest_viewpoint_ind, uncovered_low_density_point_num);
+        observed = true;
+        low_density_proxy_num_++;
       }
     }
     if (observed)

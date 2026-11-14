@@ -751,16 +751,19 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
 
   const bool stalled = low_density_no_gain_cycles_ >= pp_.kLowDensityNoGainCycleThr ||
                        low_density_no_service_cycles_ >= pp_.kLowDensityNoServiceCycleThr;
-  const bool available = !exploration_finished_ && !low_density_extension_expired_ && !stalled;
+  const bool base_available = !exploration_finished_ && !low_density_extension_expired_;
 
-  // Keep the channel enabled during guard cooling too (the gain queue simply
-  // stays empty for those cycles) so a cooldown gap cannot switch it off.
-  const bool active = available && external_work;
+  // Stall only suspends the gain channel. It must NOT release the finish
+  // latch while the publisher is still sending fresh points: with a strict
+  // visibility model many points are geometrically invisible, which used to
+  // trip no_gain and end the run although raw was still ~55. The 600 s
+  // extension timeout remains the hard stop.
+  const bool active = base_available && !stalled && external_work;
   pd_.local_coverage_planner_->SetUseLowDensity(active);
 
   // Sticky finish latch: many consecutive cycles with no FRESH external work
   // are required before exploration may complete.
-  low_density_work_pending_ = available && external_work && !idle_long_enough;
+  low_density_work_pending_ = base_available && external_work && !idle_long_enough;
 
   // Global-layer cell injection is deliberately DISABLED. Forcing EXPLORING
   // cells made IsReturningHome() flip between consecutive cycles while the
@@ -827,11 +830,11 @@ void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& 
   if (pp_.kUseLowDensityPoint)
   {
     const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
-    ROS_INFO_THROTTLE(2.0,
-                      "[LowDensity] raw=%d targets=%d uncovered=%d | cells=%d scattered=%d cooling=%d abandoned=%d",
-                      diag.raw_point_num, static_cast<int>(low_density_targets_.size()),
-                      uncovered_low_density_point_num, diag.cell_num, diag.scattered_cell_num,
-                      diag.cooling_cell_num, diag.abandoned_cell_num);
+    ROS_INFO_THROTTLE(
+        2.0, "[LowDensity] raw=%d targets=%d uncovered=%d proxy=%d | cells=%d scattered=%d cooling=%d abandoned=%d",
+        diag.raw_point_num, static_cast<int>(low_density_targets_.size()), uncovered_low_density_point_num,
+        pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.scattered_cell_num, diag.cooling_cell_num,
+        diag.abandoned_cell_num);
   }
 }
 
