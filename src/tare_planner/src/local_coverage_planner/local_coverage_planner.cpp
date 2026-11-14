@@ -21,6 +21,7 @@ bool LocalCoveragePlannerParameter::ReadParameters(ros::NodeHandle& nh)
   kMinAddFrontierPointNum = misc_utils_ns::getParam<int>(nh, "kMinAddFrontierPointNum", 30);
   kMinAddLowDensityPointNum = misc_utils_ns::getParam<int>(nh, "kMinAddLowDensityPointNum", 15);
   kMaxLowDensityViewPointNum = misc_utils_ns::getParam<int>(nh, "kMaxLowDensityViewPointNum", 2);
+  kLowDensityMinViewpointDist = misc_utils_ns::getParam<double>(nh, "kLowDensityMinViewpointDist", 3.0);
   kGreedyViewPointSampleRange = misc_utils_ns::getParam<int>(nh, "kGreedyViewPointSampleRange", 5);
   kLocalPathOptimizationItrMax = misc_utils_ns::getParam<int>(nh, "kLocalPathOptimizationItrMax", 10);
 
@@ -31,6 +32,7 @@ LocalCoveragePlanner::LocalCoveragePlanner(ros::NodeHandle& nh)
   , use_frontier_(true)
   , use_low_density_(false)
   , local_coverage_complete_(false)
+  , low_density_candidate_viewpoint_num_(0)
 {
   parameters_.ReadParameters(nh);
 }
@@ -136,6 +138,17 @@ void LocalCoveragePlanner::SelectViewPointFromLowDensityQueue(
     {
       continue;
     }
+    // Skip viewpoints sitting under the robot: they add no travel and can
+    // leave the concatenated path below the 5 m threshold, which makes the
+    // waypoint oscillate in place.
+    geometry_msgs::Point vp_position = viewpoint_manager_->GetViewPointPosition(candidate.second);
+    const double dx = vp_position.x - robot_position_.x();
+    const double dy = vp_position.y - robot_position_.y();
+    const double dz = vp_position.z - robot_position_.z();
+    if (std::sqrt(dx * dx + dy * dy + dz * dz) < parameters_.kLowDensityMinViewpointDist)
+    {
+      continue;
+    }
     int array_ind = viewpoint_manager_->GetViewPointArrayInd(candidate.second);
     int gain = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(covered, array_ind, true);
     if (gain >= parameters_.kMinAddLowDensityPointNum)
@@ -234,6 +247,7 @@ void LocalCoveragePlanner::EnqueueViewpointCandidates(std::vector<std::pair<int,
     std::sort(frontier_queue.begin(), frontier_queue.end(), SortPairInRev);
   }
   std::sort(low_density_queue.begin(), low_density_queue.end(), SortPairInRev);
+  low_density_candidate_viewpoint_num_ = static_cast<int>(low_density_queue.size());
 }
 
 void LocalCoveragePlanner::SelectViewPoint(const std::vector<std::pair<int, int>>& queue,

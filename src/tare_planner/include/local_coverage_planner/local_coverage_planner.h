@@ -27,6 +27,9 @@ struct LocalCoveragePlannerParameter
   int kMinAddFrontierPointNum;
   int kMinAddLowDensityPointNum;
   int kMaxLowDensityViewPointNum;
+  // Reject low-density viewpoints that are too close to the robot, otherwise
+  // the local TSP produces a path shorter than 5 m and the waypoint stalls.
+  double kLowDensityMinViewpointDist;
   int kGreedyViewPointSampleRange;
   int kLocalPathOptimizationItrMax;
 
@@ -88,6 +91,10 @@ public:
   {
     return serviced_low_density_point_indices_;
   }
+  int GetLowDensityCandidateViewpointNum() const
+  {
+    return low_density_candidate_viewpoint_num_;
+  }
 
   // Visualization
   void GetSelectedViewPointVisCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud);
@@ -137,6 +144,7 @@ private:
   bool use_frontier_;
   bool use_low_density_;
   bool local_coverage_complete_;
+  int low_density_candidate_viewpoint_num_;
 
   // Viewpoint indices
   int robot_viewpoint_ind_;

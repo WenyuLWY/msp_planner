@@ -12,6 +12,8 @@
 #include "sensor_coverage_planner/sensor_coverage_planner_ground.h"
 #include "graph/graph.h"
 
+#include <cfloat>
+
 namespace sensor_coverage_planner_3d_ns
 {
 bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
@@ -725,17 +727,12 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   low_density_work_pending_ = active;
   pd_.local_coverage_planner_->SetUseLowDensity(active);
 
-  std::vector<Eigen::Vector3d> cell_positions;
-  if (active)
-  {
-    const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud = pd_.planning_env_->GetUncoveredLowDensityCloud();
-    cell_positions.reserve(cloud->points.size());
-    for (const auto& point : cloud->points)
-    {
-      cell_positions.emplace_back(point.x, point.y, point.z);
-    }
-  }
-  pd_.grid_world_->SetLowDensityCellPositions(cell_positions);
+  // Global-layer cell injection is deliberately DISABLED. Forcing EXPLORING
+  // cells made IsReturningHome() flip between consecutive cycles while the
+  // concatenated path was still very short, which produced the in-place
+  // waypoint oscillation. Low-density points now influence only the local
+  // viewpoint selection and hence the local (executed) path.
+  pd_.grid_world_->SetLowDensityCellPositions(std::vector<Eigen::Vector3d>());
 
   ROS_INFO_THROTTLE(2.0,
                     "[LowDensity] state: gain=%d serviced=%d no_gain=%d no_service=%d pending=%d stalled=%d expired=%d",
@@ -1613,6 +1610,35 @@ void SensorCoveragePlanner3D::execute(const ros::TimerEvent&)
 
     lookahead_point_update_ = GetLookAheadPoint(pd_.exploration_path_, global_path, pd_.lookahead_point_);
     PublishWaypoint();
+
+    if (pp_.kUseLowDensityPoint)
+    {
+      double nearest_low_density = DBL_MAX;
+      const pcl::PointCloud<pcl::PointXYZI>::Ptr& low_density_cloud =
+          pd_.planning_env_->GetUncoveredLowDensityCloud();
+      for (const auto& point : low_density_cloud->points)
+      {
+        const double dx = point.x - pd_.robot_position_.x;
+        const double dy = point.y - pd_.robot_position_.y;
+        const double dz = point.z - pd_.robot_position_.z;
+        nearest_low_density = std::min(nearest_low_density, std::sqrt(dx * dx + dy * dy + dz * dz));
+      }
+      if (nearest_low_density == DBL_MAX)
+      {
+        nearest_low_density = -1.0;
+      }
+      ROS_INFO_THROTTLE(
+          2.0,
+          "[Path] g=%.1f l=%.1f full=%.1f nodes=%d | home=%d done=%d fin=%d | ld_q=%d ld_svc=%d ld_near=%.1f "
+          "| robot=(%.1f,%.1f) la=(%.1f,%.1f)",
+          global_path.GetLength(), local_path.GetLength(), pd_.exploration_path_.GetLength(),
+          pd_.exploration_path_.GetNodeNum(), static_cast<int>(pd_.grid_world_->IsReturningHome()),
+          static_cast<int>(pd_.local_coverage_planner_->IsLocalCoverageComplete()),
+          static_cast<int>(exploration_finished_),
+          pd_.local_coverage_planner_->GetLowDensityCandidateViewpointNum(), low_density_serviced_num_,
+          nearest_low_density, pd_.robot_position_.x, pd_.robot_position_.y, pd_.lookahead_point_.x(),
+          pd_.lookahead_point_.y());
+    }
 
     overall_processing_timer.Stop(false);
     overall_runtime_ = overall_processing_timer.GetDuration("ms");
