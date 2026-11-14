@@ -831,7 +831,7 @@ void SensorCoveragePlanner3D::UpdateCoveredAreas(int& uncovered_point_num, int& 
   {
     const low_density_point_ns::LowDensityGuardDiagnostics& diag = low_density_guard_.GetDiagnostics();
     ROS_INFO_THROTTLE(
-        2.0, "[LowDensity] raw=%d targets=%d uncovered=%d proxy=%d | cells=%d scattered=%d cooling=%d abandoned=%d",
+        2.0, "[LowDensity] raw=%d targets=%d uncovered=%d dropped=%d | cells=%d scattered=%d cooling=%d abandoned=%d",
         diag.raw_point_num, static_cast<int>(low_density_targets_.size()), uncovered_low_density_point_num,
         pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.scattered_cell_num, diag.cooling_cell_num,
         diag.abandoned_cell_num);

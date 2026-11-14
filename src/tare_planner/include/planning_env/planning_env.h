@@ -77,6 +77,11 @@ struct planning_env_ns::PlanningEnvParameters
   bool kUseCoverageBoundaryOnObjectSurface;
   // Minimum gain weight for an externally published low-density target.
   double kMinLowDensityTargetWeight;
+  // Radius within which a viewpoint can realistically re-scan (densify) a
+  // low-density surface point, and the allowed height difference. Derived
+  // from msp's lod_density / LiDAR angular resolution.
+  double kLowDensityEffectiveRange;
+  double kLowDensityMaxZDiff;
 
   void ReadParameters(ros::NodeHandle& nh);
 };

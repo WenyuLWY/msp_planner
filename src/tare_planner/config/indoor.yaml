@@ -130,10 +130,12 @@ kLocalPlanningHorizonHeight : 3.0
 # Low-density points (externally published by the mapping node)
 kUseLowDensityPoint : true
 sub_pcd_density_map_topic_ : /FilteringMappingNodelet/pcd_density_map
-kMinAddLowDensityPointNum : 1
+kMinAddLowDensityPointNum : 50
 kMaxLowDensityViewPointNum : 3
 kLowDensityMinViewpointDist : 3.0
 kMinLowDensityTargetWeight : 0.1
+kLowDensityEffectiveRange : 6.0
+kLowDensityMaxZDiff : 3.0
 kLowDensityMaxExtensionSec : 600.0
 kLowDensityNoGainCycleThr : 15
 kLowDensityNoServiceCycleThr : 30

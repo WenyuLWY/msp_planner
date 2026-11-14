@@ -189,6 +189,7 @@ public:
   void ResetCoveredLowDensityPointList()
   {
     covered_low_density_point_list_.clear();
+    covered_low_density_weight_list_.clear();
   }
   const std::vector<int>& GetCoveredPointList() const
   {
@@ -202,6 +203,10 @@ public:
   {
     return covered_low_density_point_list_;
   }
+  const std::vector<double>& GetCoveredLowDensityWeightList() const
+  {
+    return covered_low_density_weight_list_;
+  }
   void AddCoveredPoint(int point_idx)
   {
     covered_point_list_.push_back(point_idx);
@@ -210,9 +215,10 @@ public:
   {
     covered_frontier_point_list_.push_back(point_idx);
   }
-  void AddCoveredLowDensityPoint(int point_idx)
+  void AddCoveredLowDensityPoint(int point_idx, double weight)
   {
     covered_low_density_point_list_.push_back(point_idx);
+    covered_low_density_weight_list_.push_back(weight);
   }
   int GetCoveredPointNum() const
   {
@@ -275,5 +281,7 @@ private:
   std::vector<int> covered_frontier_point_list_;
   // Indices of the covered externally published low-density points
   std::vector<int> covered_low_density_point_list_;
+  // Per-target gain weight (distance/quality weighted), aligned with the list above.
+  std::vector<double> covered_low_density_weight_list_;
 };
 }  // namespace viewpoint_ns

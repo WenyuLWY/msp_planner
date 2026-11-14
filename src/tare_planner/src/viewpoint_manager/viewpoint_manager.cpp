@@ -1219,10 +1219,11 @@ void ViewPointManager::UpdateViewPointCoveredFrontierPoint(std::vector<bool>& fr
   }
 }
 
-void ViewPointManager::AddUncoveredLowDensityPoint(int viewpoint_ind, int point_ind, bool use_array_ind)
+void ViewPointManager::AddUncoveredLowDensityPoint(int viewpoint_ind, int point_ind, double weight,
+                                                   bool use_array_ind)
 {
   int array_ind = GetViewPointArrayInd(viewpoint_ind, use_array_ind);
-  viewpoints_[array_ind].AddCoveredLowDensityPoint(point_ind);
+  viewpoints_[array_ind].AddCoveredLowDensityPoint(point_ind, weight);
 }
 
 const std::vector<int>& ViewPointManager::GetViewPointCoveredLowDensityPointList(int viewpoint_ind,
@@ -1251,6 +1252,24 @@ int ViewPointManager::GetViewPointCoveredLowDensityPointNum(const std::vector<bo
     }
   }
   return covered_point_num;
+}
+
+int ViewPointManager::GetViewPointCoveredLowDensityGain(const std::vector<bool>& point_list, int viewpoint_index,
+                                                        bool use_array_ind)
+{
+  int array_ind = GetViewPointArrayInd(viewpoint_index, use_array_ind);
+  const std::vector<int>& indices = viewpoints_[array_ind].GetCoveredLowDensityPointList();
+  const std::vector<double>& weights = viewpoints_[array_ind].GetCoveredLowDensityWeightList();
+  double gain = 0.0;
+  for (std::size_t i = 0; i < indices.size() && i < weights.size(); i++)
+  {
+    MY_ASSERT(misc_utils_ns::InRange<bool>(point_list, indices[i]));
+    if (!point_list[indices[i]])
+    {
+      gain += weights[i];
+    }
+  }
+  return static_cast<int>(100.0 * gain);
 }
 
 void ViewPointManager::UpdateViewPointCoveredLowDensityPoint(std::vector<bool>& point_list, int viewpoint_index,

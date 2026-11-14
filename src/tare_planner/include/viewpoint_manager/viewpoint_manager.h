@@ -295,7 +295,8 @@ public:
   void ResetViewPointCoveredPointList(int viewpoint_ind, bool use_array_ind = false);
   void AddUncoveredPoint(int viewpoint_ind, int point_ind, bool use_array_ind = false);
   void AddUncoveredFrontierPoint(int viewpoint_ind, int point_ind, bool use_array_ind = false);
-  void AddUncoveredLowDensityPoint(int viewpoint_ind, int point_ind, bool use_array_ind = false);
+  void AddUncoveredLowDensityPoint(int viewpoint_ind, int point_ind, double weight,
+                                   bool use_array_ind = false);
   const std::vector<int>& GetViewPointCoveredPointList(int viewpoint_ind, bool use_array_ind = false) const;
   const std::vector<int>& GetViewPointCoveredFrontierPointList(int viewpoint_ind, bool use_array_ind = false) const;
   const std::vector<int>& GetViewPointCoveredLowDensityPointList(int viewpoint_ind,
@@ -309,6 +310,9 @@ public:
                                           bool use_array_ind = false);
   int GetViewPointCoveredLowDensityPointNum(const std::vector<bool>& point_list, int viewpoint_index,
                                             bool use_array_ind = false);
+  // Fixed-point (x100) distance/quality weighted gain for low-density targets.
+  int GetViewPointCoveredLowDensityGain(const std::vector<bool>& point_list, int viewpoint_index,
+                                        bool use_array_ind = false);
   void UpdateViewPointCoveredPoint(std::vector<bool>& point_list, int viewpoint_index, bool use_array_ind = false);
   void UpdateViewPointCoveredFrontierPoint(std::vector<bool>& frontier_point_list, int viewpoint_index,
                                            bool use_array_ind = false);

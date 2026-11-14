@@ -150,7 +150,7 @@ void LocalCoveragePlanner::SelectViewPointFromLowDensityQueue(
       continue;
     }
     int array_ind = viewpoint_manager_->GetViewPointArrayInd(candidate.second);
-    int gain = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(covered, array_ind, true);
+    int gain = viewpoint_manager_->GetViewPointCoveredLowDensityGain(covered, array_ind, true);
     if (gain >= parameters_.kMinAddLowDensityPointNum)
     {
       queue.emplace_back(gain, candidate.second);
@@ -173,7 +173,7 @@ void LocalCoveragePlanner::SelectViewPointFromLowDensityQueue(
     for (auto& entry : queue)
     {
       int array_ind = viewpoint_manager_->GetViewPointArrayInd(entry.second);
-      entry.first = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(covered, array_ind, true);
+      entry.first = viewpoint_manager_->GetViewPointCoveredLowDensityGain(covered, array_ind, true);
     }
     std::sort(queue.begin(), queue.end(), SortPairInRev);
   }
@@ -231,11 +231,11 @@ void LocalCoveragePlanner::EnqueueViewpointCandidates(std::vector<std::pair<int,
       {
         continue;
       }
-      int covered_low_density_point_num = viewpoint_manager_->GetViewPointCoveredLowDensityPointNum(
+      int low_density_gain = viewpoint_manager_->GetViewPointCoveredLowDensityGain(
           covered_low_density_point_list, viewpoint_array_index, true);
-      if (covered_low_density_point_num >= parameters_.kMinAddLowDensityPointNum)
+      if (low_density_gain >= parameters_.kMinAddLowDensityPointNum)
       {
-        low_density_queue.emplace_back(covered_low_density_point_num, viewpoint_index);
+        low_density_queue.emplace_back(low_density_gain, viewpoint_index);
       }
     }
   }
