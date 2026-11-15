@@ -133,6 +133,14 @@ struct PlannerParameters
   // Robot must move at least this far (or actually service a target) to
   // refresh the progress clock; small in-place jitter does not count.
   double kLowDensityProgressDistance;
+  // "Plateau" completion: once densification has converged, the remaining
+  // points are un-densifiable residue. If both the active cluster count and
+  // the gain stay at or below these thresholds for kLowDensityPlateauSec with
+  // NO resolved clusters in between, finish instead of shuttling for another
+  // minute waiting for the no-progress timer.
+  double kLowDensityPlateauSec;
+  int kLowDensityPlateauActiveThr;
+  int kLowDensityPlateauGainThr;
 
   bool ReadParameters(ros::NodeHandle& nh);
 };
@@ -249,6 +257,7 @@ private:
   bool low_density_progress_pos_valid_;
   double low_density_max_progress_dist_;
   int low_density_no_viewpoint_cycles_;
+  double low_density_plateau_start_sec_;
 
   ros::Time start_time_;
   ros::Time global_direction_switch_time_;

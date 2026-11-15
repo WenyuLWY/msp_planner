@@ -145,6 +145,9 @@ kLowDensityFinishHysteresisCycles : 10
 kLowDensityStaleMsgSec : 5.0
 kLowDensityNoProgressSec : 60.0
 kLowDensityProgressDistance : 3.0
+kLowDensityPlateauSec : 20.0
+kLowDensityPlateauActiveThr : 3
+kLowDensityPlateauGainThr : 5
 low_density/anchor_cell_size : 3.0
 low_density/dedup_voxel_size : 0.4
 low_density/min_support_points : 3

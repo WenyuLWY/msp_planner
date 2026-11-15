@@ -63,6 +63,9 @@ bool PlannerParameters::ReadParameters(ros::NodeHandle& nh)
   kLowDensityStaleMsgSec = misc_utils_ns::getParam<double>(nh, "kLowDensityStaleMsgSec", 5.0);
   kLowDensityNoProgressSec = misc_utils_ns::getParam<double>(nh, "kLowDensityNoProgressSec", 60.0);
   kLowDensityProgressDistance = misc_utils_ns::getParam<double>(nh, "kLowDensityProgressDistance", 3.0);
+  kLowDensityPlateauSec = misc_utils_ns::getParam<double>(nh, "kLowDensityPlateauSec", 20.0);
+  kLowDensityPlateauActiveThr = misc_utils_ns::getParam<int>(nh, "kLowDensityPlateauActiveThr", 3);
+  kLowDensityPlateauGainThr = misc_utils_ns::getParam<int>(nh, "kLowDensityPlateauGainThr", 5);
 
   // Double
   kKeyposeCloudDwzFilterLeafSize = misc_utils_ns::getParam<double>(nh, "kKeyposeCloudDwzFilterLeafSize", 0.2);
@@ -205,6 +208,7 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D(ros::NodeHandle& nh, ros::NodeH
   , low_density_progress_pos_valid_(false)
   , low_density_max_progress_dist_(0.0)
   , low_density_no_viewpoint_cycles_(0)
+  , low_density_plateau_start_sec_(-1.0)
 {
   initialize(nh, nh_p);
   PrintExplorationStatus("Exploration Started", false);
@@ -793,14 +797,15 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   }
   const bool no_progress = (now_sec - low_density_last_progress_sec_) > pp_.kLowDensityNoProgressSec;
 
-  // A second, semantic completion signal: the guard has retired every cluster
-  // it knows about (all abandoned or gone, none cooling). Combined with the
-  // give-up policy this is the "nothing reachable left, go home" condition.
-  // Only accumulate the "retired" counter while the publisher is actually
-  // fresh. Otherwise a short dropout burns through the hysteresis and the
-  // run ends the instant messages resume.
-  const bool guard_exhausted = fresh && diag.active_cell_num == 0 && diag.cooling_cell_num == 0 &&
-                               diag.output_point_num == 0;
+  // A second, semantic completion signal: no active cluster and no released
+  // target. NOTE: the old version ALSO required cooling_cell_num == 0, but
+  // the exponential cooldown chain (8/16/32/64 s) keeps cooling at 2..17 for
+  // the entire converged tail, so that counter never reached its hysteresis
+  // even once -- the backup completion path was dead code. Cooling clusters
+  // produce no targets by definition, so they must not block finishing.
+  // Still gated on fresh: a short dropout must not burn through the
+  // hysteresis and end the run the instant messages resume.
+  const bool guard_exhausted = fresh && diag.active_cell_num == 0 && diag.output_point_num == 0;
   if (guard_exhausted)
   {
     low_density_no_viewpoint_cycles_++;
@@ -810,6 +815,31 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
     low_density_no_viewpoint_cycles_ = 0;
   }
   const bool guard_done = low_density_no_viewpoint_cycles_ >= pp_.kLowDensityFinishHysteresisCycles;
+
+  // "Plateau" completion. After convergence the remaining points are
+  // un-densifiable residue: active stays 0..3 and gain 0..5 while resolved
+  // is 0, yet the robot keeps shuttling on 2-15 m paths because the 60 s
+  // no-progress timer has not expired. Any real densification (resolved>0)
+  // or any fresh burst of reachable targets resets this clock, so the
+  // productive phase (active 20..29, gain 10..42) can never trip it.
+  const bool low_gain_plateau =
+      fresh && diag.active_cell_num <= pp_.kLowDensityPlateauActiveThr &&
+      low_density_uncovered_num_ <= pp_.kLowDensityPlateauGainThr && diag.resolved_cell_num == 0;
+  if (low_gain_plateau)
+  {
+    if (low_density_plateau_start_sec_ < 0.0)
+    {
+      low_density_plateau_start_sec_ = now_sec;
+    }
+  }
+  else
+  {
+    low_density_plateau_start_sec_ = -1.0;
+  }
+  const double plateau_sec = low_density_plateau_start_sec_ >= 0.0 ?
+                                 now_sec - low_density_plateau_start_sec_ : 0.0;
+  const bool plateau_done = low_density_plateau_start_sec_ >= 0.0 &&
+                            plateau_sec > pp_.kLowDensityPlateauSec;
 
   const bool has_gain = low_density_uncovered_num_ > 0;
   if (has_gain && !low_density_prev_has_gain_)
@@ -834,10 +864,10 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
   pd_.local_coverage_planner_->SetUseLowDensity(active);
 
   // Finish latch: no fresh external work, no robot motion for the configured
-  // window, or the guard having retired every cluster. Plus the 600 s hard
-  // timeout as the ultimate backstop.
+  // window, the guard having retired every cluster, or a sustained low-gain
+  // plateau. Plus the 600 s hard timeout as the ultimate backstop.
   low_density_work_pending_ = base_available && external_work && !idle_long_enough && !no_progress &&
-                              !guard_done;
+                              !guard_done && !plateau_done;
 
   // Global-layer cell injection is deliberately DISABLED. Forcing EXPLORING
   // cells made IsReturningHome() flip between consecutive cycles while the
@@ -850,13 +880,13 @@ void SensorCoveragePlanner3D::UpdateLowDensityPlanningState()
       2.0,
       "[LowDensity] state: raw=%d gain=%d serviced=%d dropped=%d | cells=%d active=%d cooling=%d abandoned=%d "
       "resolved=%d attempting=%d svc_fail=%d | no_gain=%d no_service=%d no_work=%d guard_idle=%d | idle=%.0fs "
-      "no_prog=%d guard_done=%d pending=%d stalled=%d expired=%d fresh=%d",
+      "no_prog=%d guard_done=%d plat=%.0fs plat_done=%d pending=%d stalled=%d expired=%d fresh=%d",
       diag.raw_point_num, low_density_uncovered_num_, low_density_serviced_num_,
       pd_.planning_env_->GetLowDensityProxyNum(), diag.cell_num, diag.active_cell_num, diag.cooling_cell_num,
       diag.abandoned_cell_num, diag.resolved_cell_num, diag.attempting_cell_num, diag.serviced_fail_cell_num,
-      low_density_no_gain_cycles_,
-      low_density_no_service_cycles_, low_density_no_work_cycles_, low_density_no_viewpoint_cycles_,
-      now_sec - low_density_last_progress_sec_, static_cast<int>(no_progress), static_cast<int>(guard_done),
+      low_density_no_gain_cycles_, low_density_no_service_cycles_, low_density_no_work_cycles_,
+      low_density_no_viewpoint_cycles_, now_sec - low_density_last_progress_sec_, static_cast<int>(no_progress),
+      static_cast<int>(guard_done), plateau_sec, static_cast<int>(plateau_done),
       static_cast<int>(low_density_work_pending_), static_cast<int>(stalled),
       static_cast<int>(low_density_extension_expired_), static_cast<int>(fresh));
 }
