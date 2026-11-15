@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>tare_planner</name>
+  <name>msp_planner</name>
   <version>0.0.0</version>
   <description>TARE Exploration Planner for Ground Vehicles</description>
   <maintainer email="ccao1@andrew.cmu.edu">Chao Cao</maintainer>
